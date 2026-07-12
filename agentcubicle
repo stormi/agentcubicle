@@ -1,23 +1,28 @@
 #!/bin/bash
-# Run opencode in an isolated Docker container, starting in a read-only
+# Run opencode or claude in an isolated Docker container, starting in a read-only
 # plan mode you manually escalate out of. Project files are mounted read-write.
 #
 # Usage:
-#   agentcubicle setup [--clear]                          # Build the image with dev tools
+#   agentcubicle setup [--clear] [--claude]               # Build base image; --claude adds Claude Code
 #   agentcubicle check [--img IMAGE]                     # Inspect image for required tools
 #   agentcubicle commit [--name NAME]                     # Commit running container
 #   agentcubicle cleanup                                  # Remove stopped containers
-#   agentcubicle opencode [--mount MOUNT] [--env ENV] [--img IMAGE] [--name NAME] [--] [tool args...]
+#   agentcubicle <opencode|claude> [--mount MOUNT] [--env ENV] [--img IMAGE] [--name NAME] [--] [tool args...]
 #
 # Examples:
 #   agentcubicle setup
+#   agentcubicle setup --claude
 #   agentcubicle setup --clear
 #   agentcubicle check
+#   agentcubicle commit
+#   agentcubicle commit --name ac-myproject-abc123
 #   agentcubicle cleanup
 #   agentcubicle opencode
+#   agentcubicle claude
 #   agentcubicle opencode --name my-session
+#   agentcubicle claude --env ANTHROPIC_API_KEY="$(cat ~/.claude-key)"
 #   agentcubicle opencode --mount /etc/ssh:/etc/ssh:ro
-#   agentcubicle opencode -- --model claude-sonnet-4
+#   agentcubicle claude -- --model sonnet
 
 set -euo pipefail
 
@@ -112,9 +117,13 @@ if [[ "$COMMAND" == "setup" ]]; then
         CLEAR=true
         shift
         ;;
+      --claude)
+        EXTRA_ARGS+=("--claude")
+        shift
+        ;;
       *)
         echo "Error: unknown argument '$1' for setup."
-        echo "Usage: agentcubicle setup [--clear]"
+        echo "Usage: agentcubicle setup [--clear] [--claude]"
         exit 1
         ;;
     esac
@@ -158,10 +167,10 @@ fi
 # --- Phase 2: run mode — requires opencode ---
 if [[ -z "$COMMAND" ]]; then
   if [[ $# -lt 1 ]] || [[ "$1" == "--" ]]; then
-    echo "Error: First argument must be 'opencode'."
+    echo "Error: First argument must be 'opencode' or 'claude'."
     echo ""
-    echo "Usage: agentcubicle opencode [options...] [--] [tool args...]"
-    echo "       agentcubicle setup [--clear]"
+    echo "Usage: agentcubicle <opencode|claude> [options...] [--] [tool args...]"
+    echo "       agentcubicle setup [--clear] [--claude]"
     echo "       agentcubicle check [--img IMAGE]"
     echo "       agentcubicle commit [--name NAME]"
     echo "       agentcubicle cleanup"
@@ -171,8 +180,8 @@ if [[ -z "$COMMAND" ]]; then
   TOOL="$1"
   shift
 
-  if [[ "$TOOL" != "opencode" ]]; then
-    echo "Error: Unknown tool '$TOOL'. Must be 'opencode'."
+  if [[ "$TOOL" != "opencode" && "$TOOL" != "claude" ]]; then
+    echo "Error: Unknown tool '$TOOL'. Must be 'opencode' or 'claude'."
     exit 1
   fi
 
@@ -217,6 +226,13 @@ fi
 
 # -- setup: build custom image with dev tools and clipboard --
 if [[ "$COMMAND" == "setup" ]]; then
+  INSTALL_CLAUDE=false
+  for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do
+    if [[ "$arg" == "--claude" ]]; then
+      INSTALL_CLAUDE=true
+    fi
+  done
+
   # Remove existing image first if --clear is set
   if $CLEAR; then
     docker image rm -f "$COMMIT_TARGET" >/dev/null 2>/dev/null || true
@@ -227,9 +243,26 @@ if [[ "$COMMAND" == "setup" ]]; then
     NO_CACHE_ARGS=(--no-cache)
   fi
 
+  NEEDS_BASE=false
+  NEEDS_CLAUDE=false
+  HAS_CLAUDE=false
+
   if docker image inspect "$COMMIT_TARGET" >/dev/null 2>&1; then
-    echo "Image $COMMIT_TARGET is ready."
-    exit 0
+    if docker run --entrypoint sh --rm "$COMMIT_TARGET" -c "test -x /home/user/.local/bin/claude" 2>/dev/null; then
+      HAS_CLAUDE=true
+    fi
+
+    if $INSTALL_CLAUDE && ! $HAS_CLAUDE; then
+      NEEDS_CLAUDE=true
+    elif ! $INSTALL_CLAUDE; then
+      echo "Image $COMMIT_TARGET is ready."
+      if $HAS_CLAUDE; then
+        echo "Claude Code is also installed."
+      fi
+      exit 0
+    fi
+  else
+    NEEDS_BASE=true
   fi
 
   PKG_NAMES=()
@@ -237,20 +270,53 @@ if [[ "$COMMAND" == "setup" ]]; then
     PKG_NAMES+=("${entry%%:*}")
   done
 
-  echo "Building $COMMIT_TARGET with dev tools ..."
-  docker build --progress=plain ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} --build-arg PACKAGES="${PKG_NAMES[*]}" -t "$COMMIT_TARGET" - < <(
-    cat <<'EOF'
+  # Build base + optionally claude in one go
+  BUILD_CLAUDE=false
+  if $NEEDS_BASE && $INSTALL_CLAUDE; then
+    BUILD_CLAUDE=true
+  fi
+
+  if $NEEDS_BASE; then
+    echo "Building $COMMIT_TARGET with dev tools ..."
+    docker build --progress=plain ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} --build-arg PACKAGES="${PKG_NAMES[*]}" --build-arg INSTALL_CLAUDE="$BUILD_CLAUDE" -t "$COMMIT_TARGET" - < <(
+      cat <<'EOF'
 FROM ghcr.io/anomalyco/opencode
 ARG PACKAGES
+ARG INSTALL_CLAUDE
 RUN apk add --no-cache $PACKAGES bash libgcc libstdc++ ripgrep shadow
 RUN addgroup -g 1000 user 2>/dev/null || true
 RUN adduser -u 1000 -G user -D -h /home/user user 2>/dev/null || true
 RUN mkdir -p /usr/local/bin
 ENV PATH="/usr/local/bin:$PATH"
 ENV USE_BUILTIN_RIPGREP=0
+RUN if [ "$INSTALL_CLAUDE" = "true" ]; then su -s /bin/sh user -c 'export PATH="/home/user/.local/bin:$PATH" USE_BUILTIN_RIPGREP=0; curl -fsSL https://claude.ai/install.sh | bash'; fi
 EOF
-  )
-  echo "Done. Image '$COMMIT_TARGET' is ready."
+    )
+    echo "Done. Image '$COMMIT_TARGET' is ready."
+  fi
+
+  # If image existed but lacks claude, add it on top
+  if $NEEDS_CLAUDE; then
+    echo "Adding claude to $COMMIT_TARGET ..."
+    docker build --progress=plain ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} -t "$COMMIT_TARGET" - < <(
+       cat <<EOF
+FROM $COMMIT_TARGET
+RUN apk add --no-cache shadow
+RUN addgroup -g 1000 user 2>/dev/null || true; adduser -u 1000 -G user -D -h /home/user user 2>/dev/null || true
+RUN mkdir -p /usr/local/bin
+ENV PATH="/usr/local/bin:\$PATH"
+ENV USE_BUILTIN_RIPGREP=0
+RUN su -s /bin/sh user -c 'export PATH="/home/user/.local/bin:$PATH" USE_BUILTIN_RIPGREP=0; curl -fsSL https://claude.ai/install.sh | bash'
+EOF
+    )
+    echo "Done. Claude Code is installed."
+  else
+    echo "Image $COMMIT_TARGET is ready."
+    if $HAS_CLAUDE; then
+      echo "Claude Code is already installed."
+    fi
+  fi
+
   exit 0
 fi
 
@@ -272,6 +338,14 @@ if [[ "$COMMAND" == "check" ]]; then
       MISSING=1
     fi
   done
+
+  # Also check for claude (installed to /home/user/.local/bin/claude)
+  if docker run --entrypoint sh --rm "$IMAGE" -c "test -x /home/user/.local/bin/claude" 2>/dev/null; then
+    _ok "claude"
+  else
+    _missing "claude"
+    MISSING=1
+  fi
 
   if [[ "$MISSING" -eq 1 ]]; then
     echo ""
@@ -366,6 +440,37 @@ elif [[ -n "${DISPLAY:-}" ]]; then
   EXTRA_ENVS+=("-e" "DISPLAY=$DISPLAY")
 fi
 
+# Auto-forward a static Claude Code OAuth token (from `claude setup-token`) so
+# `agentcubicle claude` just works with no flags, once set up once. Only
+# for the claude tool, and only if the caller hasn't already set it via --env.
+if [[ "$TOOL" == "claude" ]]; then
+  HAS_EXPLICIT_TOKEN=false
+  for env_entry in "${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}"; do
+    if [[ "$env_entry" == CLAUDE_CODE_OAUTH_TOKEN=* ]]; then
+      HAS_EXPLICIT_TOKEN=true
+      break
+    fi
+  done
+
+  if ! $HAS_EXPLICIT_TOKEN; then
+    if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+      EXTRA_ENVS+=("-e" "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
+    elif [[ -s "$HOME/.claude/oauth-token" ]]; then
+      EXTRA_ENVS+=("-e" "CLAUDE_CODE_OAUTH_TOKEN=$(cat "$HOME/.claude/oauth-token")")
+    fi
+  fi
+fi
+
+# Build the inner command that runs as `user` (non-root), base64-encoded to
+# avoid nested quoting issues across the shell boundary. opencode carries its
+# container-only config override; claude starts in its own built-in plan mode.
+if [[ "$TOOL" == "opencode" ]]; then
+  INNER_CMD="export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; exec opencode --agent plan \"\$@\""
+else
+  INNER_CMD="exec claude --permission-mode plan \"\$@\""
+fi
+INNER_B64=$(printf '%s' "$INNER_CMD" | base64 -w0)
+
 echo "Starting container: ${CONTAINER_NAME}"
 
 # The container's $HOME (/home/user) is throwaway scratch space, discarded
@@ -382,7 +487,8 @@ docker run -it \
   -e HOME=/home/user \
   -e "HOST_UID=$(id -u)" \
   -e "HOST_GID=$(id -g)" \
-  -e "OPENCODE_CONFIG_CONTENT=$OPENCODE_CONFIG_JSON" \
+  -e "INNER_B64=$INNER_B64" \
+  -e "TOOL=$TOOL" \
   ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"} \
   "$IMAGE" \
   -c \
@@ -395,5 +501,6 @@ docker run -it \
    # needlessly touch every inode of the actual project tree.
    find /home/user -mindepth 1 -maxdepth 1 ! -name project ! -name .Xauthority -exec chown -R $HOST_UID:$HOST_GID {} +
    export HOME=/home/user
-   exec su -s /bin/sh -c "export PATH=\"/home/user/.local/bin:\$PATH\"; exec opencode --agent plan \"\$@\"" user _ "$@"' \
+   CMD=$(echo "$INNER_B64" | base64 -d)
+   exec su -s /bin/sh -c "export PATH=\"/home/user/.local/bin:\$PATH\"; $CMD" user _ "$@"' \
   _ ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
