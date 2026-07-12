@@ -456,6 +456,33 @@ fi
 # them in the resolved rule list, so it can win. Accepted trade-off.
 OPENCODE_CONFIG_JSON='{"permission":{"*":"allow"}}'
 
+# Forward a safe, curated subset of the host's global git config (identity +
+# a few UX settings) into the container. Allowlist, not blocklist, so we never
+# have to guess what's dangerous: credential helpers, GPG/commit-signing keys,
+# and any path-valued settings (core.excludesfile, core.hooksPath, ...) are
+# simply never considered, since they'd either hang/fail (helpers, signing
+# without a key) or require mounting host files outside the project directory.
+GIT_ALLOWLIST=(user.name user.email init.defaultBranch pull.rebase push.default push.autoSetupRemote core.editor color.ui rerere.enabled merge.conflictstyle)
+TMP_GITCONFIG="$(mktemp)"
+for key in "${GIT_ALLOWLIST[@]}"; do
+  val="$(git config --global --get "$key" 2>/dev/null || true)"
+  [[ -n "$val" ]] && git config --file "$TMP_GITCONFIG" "$key" "$val"
+done
+# --null: NUL-separates each key/value record and preserves embedded
+# newlines in the value literally (git's own default line-based output
+# would truncate a multi-line shell-function alias at its first newline).
+while IFS= read -r -d '' entry; do
+  [[ -z "$entry" ]] && continue
+  key="${entry%%$'\n'*}"
+  val="${entry#*$'\n'}"
+  git config --file "$TMP_GITCONFIG" "$key" "$val"
+done < <(git config --global --get-regexp --null '^alias\.' 2>/dev/null || true)
+HOST_GITCONFIG_B64=""
+if [[ -s "$TMP_GITCONFIG" ]]; then
+  HOST_GITCONFIG_B64="$(base64 -w0 < "$TMP_GITCONFIG")"
+fi
+rm -f "$TMP_GITCONFIG"
+
 # Auto-detect clipboard/display backend and mount appropriate socket
 if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${XDG_RUNTIME_DIR:-}" && -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]]; then
   EXTRA_MOUNTS+=("-v" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY")
@@ -490,13 +517,25 @@ if [[ "$TOOL" == "claude" ]]; then
   fi
 fi
 
-# Build the inner command that runs as `user` (non-root), base64-encoded to
-# avoid nested quoting issues across the shell boundary. opencode carries its
-# container-only config override; claude starts in its own built-in plan mode.
+if [[ -n "$HOST_GITCONFIG_B64" ]]; then
+  EXTRA_ENVS+=("-e" "HOST_GITCONFIG_B64=$HOST_GITCONFIG_B64")
+fi
+
+# Build the inner command that runs as `user` (non-root).
+# Base64-encode it to avoid nested quoting issues across shell boundaries.
+#
+# GIT_SETUP is shared by both tools: it decodes the forwarded host gitconfig
+# (if any) straight to a file and points --global include.path at it, rather
+# than reconstructing individual `git config` calls from arbitrary values —
+# this is deliberate: arbitrary values re-parsed as shell text through the
+# su -c reparse below is exactly the bug class fixed elsewhere in this script
+# (see the single-quoting around OPENCODE_CONFIG_CONTENT).
+GIT_SETUP='if [ -n "$HOST_GITCONFIG_B64" ]; then printf %s "$HOST_GITCONFIG_B64" | base64 -d > "$HOME/.gitconfig-forwarded" && git config --global include.path "$HOME/.gitconfig-forwarded"; fi; git config --global --add safe.directory '"$CONTAINER_PROJECT_DIR"'; '
+
 if [[ "$TOOL" == "opencode" ]]; then
-  INNER_CMD="export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; exec opencode --agent plan \"\$@\""
+  INNER_CMD="$GIT_SETUP export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; exec opencode --agent plan \"\$@\""
 else
-  INNER_CMD="export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; exec claude --permission-mode plan \"\$@\""
+  INNER_CMD="$GIT_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; exec claude --permission-mode plan \"\$@\""
 fi
 INNER_B64=$(printf '%s' "$INNER_CMD" | base64 -w0)
 
