@@ -457,6 +457,23 @@ else
   CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME:/root${DOCKER_CONFIG_ROOT}:ro")
 fi
 
+# Whether the host's opencode config defines any real providers, as
+# opposed to relying solely on opencode's built-in free fallback models.
+# Tries jq first (handles plain JSON correctly, including a present-but-
+# empty "provider": {}); falls back to a flattened-then-grepped heuristic
+# for .jsonc files with comments, which jq cannot parse.
+OPENCODE_HAS_PROVIDER=false
+if [[ "$TOOL" == "opencode" ]]; then
+  for cfg in "$CONFIG_HOME/opencode.json" "$CONFIG_HOME/opencode.jsonc"; do
+    [[ -f "$cfg" ]] || continue
+    if PROVIDER_COUNT=$(jq -r '.provider // {} | length' "$cfg" 2>/dev/null); then
+      [[ "$PROVIDER_COUNT" -gt 0 ]] && OPENCODE_HAS_PROVIDER=true
+    elif tr -d '\n\r' < "$cfg" | grep -q '"provider"[[:space:]]*:[[:space:]]*{[[:space:]]*[^[:space:]}]'; then
+      OPENCODE_HAS_PROVIDER=true
+    fi
+  done
+fi
+
 # Container-only opencode config override (never touches host config), sent
 # via OPENCODE_CONFIG_CONTENT below. Two things live in it:
 # - A blanket permission allow. Combined with --agent plan below, this makes
@@ -688,6 +705,17 @@ if [[ "$TOOL" == "claude" ]]; then
       EXTRA_ENVS+=("-e" "CLAUDE_CODE_OAUTH_TOKEN=$(cat "$HOME/.claude/oauth-token")")
     fi
   fi
+
+  # Whether claude will actually have something to authenticate with once
+  # the container starts, after every detection path above has had a
+  # chance to populate EXTRA_ENVS.
+  CLAUDE_HAS_CREDENTIALS=false
+  for env_entry in "${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}"; do
+    if [[ "$env_entry" == CLAUDE_CODE_OAUTH_TOKEN=* || "$env_entry" == ANTHROPIC_API_KEY=* ]]; then
+      CLAUDE_HAS_CREDENTIALS=true
+      break
+    fi
+  done
 fi
 
 if [[ -n "$HOST_GITCONFIG_B64" ]]; then
@@ -718,10 +746,47 @@ KICKOFF_PROMPT='Without spending extra time deliberating, briefly tell me which 
 
 if [[ "$TOOL" == "opencode" ]]; then
   INNER_CMD="$GIT_SETUP export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; exec opencode --agent plan --prompt '$KICKOFF_PROMPT' \"\$@\""
-else
+elif $CLAUDE_HAS_CREDENTIALS; then
   INNER_CMD="$GIT_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; exec claude --permission-mode plan \"\$@\" '$KICKOFF_PROMPT'"
+else
+  # No credentials detected on the host. Instead of starting a normal
+  # session (which would just hit a login wall), guide the user through
+  # `claude setup-token` right here and tell them exactly what to do with
+  # the printed token. Ends in an interactive shell (not exec claude) so
+  # they have somewhere to type the save command before the container
+  # exits. No apostrophes/quotes in this text — it is embedded between
+  # single quotes below and survives the same su -c reparse as
+  # KICKOFF_PROMPT.
+  CLAUDE_BOOTSTRAP_INTRO_MSG=$(cat <<EOF
+No Claude Code credentials were found for this container (no oauth-token file, no CLAUDE_CODE_OAUTH_TOKEN, no ANTHROPIC_API_KEY). Generating one now instead of starting a normal session.
+
+claude setup-token will print a URL below. Open it in a browser, log into the Claude account, and authorize. It will then print a token string right here in this terminal - that token is what agentcubicle needs saved on the host so future runs skip this step.
+EOF
+  )
+  CLAUDE_BOOTSTRAP_SUCCESS_MSG=$(cat <<EOF
+
+Save the printed token into the bind-mounted project directory so it survives this container exiting:
+  echo <paste token here> > $CONTAINER_PROJECT_DIR/.claude-oauth-token
+
+Then exit this container (exit or Ctrl-D). On the host, run:
+  mkdir -p ~/.claude && mv .claude-oauth-token ~/.claude/oauth-token && chmod 600 ~/.claude/oauth-token
+
+Then start a fresh container to confirm it worked: agentcubicle claude
+EOF
+  )
+  INNER_CMD="$GIT_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; echo '$CLAUDE_BOOTSTRAP_INTRO_MSG'; if claude setup-token; then echo '$CLAUDE_BOOTSTRAP_SUCCESS_MSG'; else echo 'Token setup did not finish. Run agentcubicle claude again to retry.'; fi; exec sh"
 fi
 INNER_B64=$(printf '%s' "$INNER_CMD" | base64 -w0)
+
+if [[ "$TOOL" == "claude" ]] && ! $CLAUDE_HAS_CREDENTIALS; then
+  echo "No Claude Code credentials detected (no ~/.claude/oauth-token, no CLAUDE_CODE_OAUTH_TOKEN, no ANTHROPIC_API_KEY)."
+  echo "Starting a container to generate one via 'claude setup-token' instead of a normal session."
+fi
+
+if [[ "$TOOL" == "opencode" ]] && ! $OPENCODE_HAS_PROVIDER; then
+  echo "No providers configured in $CONFIG_HOME/opencode.json(c) — only opencode's built-in free models will be available."
+  echo "To add a real provider: add a \"provider\" section to that file with an API key referenced as {env:YOUR_VAR}, then pass the actual value with --env YOUR_VAR=... when running agentcubicle opencode."
+fi
 
 echo "Starting container: ${CONTAINER_NAME}"
 
@@ -784,3 +849,5 @@ docker run -it \
     CMD=$(echo "$INNER_B64" | base64 -d)
     exec su -s /bin/sh -c "export PATH=\"/home/user/.local/bin:\$PATH\"; $CMD" user _ "$@"' \
   _ ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+
+
