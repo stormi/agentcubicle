@@ -570,23 +570,36 @@ AGENTS_CONTENT=$(cat <<'AGENTS_EOF'
 # AGENTS.md (agentcubicle local file)
 
 > Local-only, machine-specific file maintained by `agentcubicle` at
-> `.agentcubicle/AGENTS.md`. opencode reads it automatically (via its global
-> config's `instructions` list), *in addition to* any AGENTS.md the project
-> itself already has — this is supplementary, never a replacement. Claude
-> Code doesn't read AGENTS.md natively; see `.agentcubicle/CLAUDE.md`
-> (exposed as `CLAUDE.local.md`) for how it's wired in there instead.
-> Nothing here is ever committed, tracked, or shared with anyone who clones
-> the repo.
+> `.agentcubicle/AGENTS.md`, loaded automatically by whichever coding agent
+> is running (mechanism varies by tool; see README.md if you are a human
+> curious how) — *in addition to* any AGENTS.md the project itself already
+> has, never as a replacement. Nothing here is ever committed, tracked, or
+> shared with anyone who clones the repo.
 
 ## Rules
+
+General, tool-agnostic agent rules and conventions for this project go
+here. A few sensible defaults to start with:
 
 - Never push to a remote, or suggest pushing (e.g. offering "push to
   origin" as a follow-up after a commit). This container's workflow is
   commit-only: pushing happens on the host, by the user, after
   reviewing what was committed.
+- Prefer separate commits for logically distinct changes.
+- When a local, non-shared file needs to be kept out of a repo's history,
+  use `.git/info/exclude`, never `.gitignore` (a `.gitignore` entry is
+  tracked and leaks your tooling choices to anyone who clones).
+- No `Co-Authored-By` trailer is forced by the container — that's left as a
+  host-side, user-level preference.
 
-General, tool-agnostic agent rules and conventions for this project go
-here. Keep Claude-Code-only instructions in `.agentcubicle/CLAUDE.md` instead.
+## Updating the rules
+
+When updating agent rules, select the appropriate destination:
+
+* If the instructions are specific to the agentcubicle container context: `.agentcubicle/AGENTS.md`.
+* If not:
+  * If a git-tracked `AGENTS.md` exists at the project level, ask the user where to put the instructions.
+  * Else `.agentcubicle/AGENTS.md`.
 
 ## Memory
 
@@ -636,12 +649,13 @@ MEMORY_CONTENT=$(cat <<'MEMORY_EOF'
 # MEMORY.md (agentcubicle local file)
 
 > Local-only, machine-specific continuity notes maintained by
-> `agentcubicle` at `.agentcubicle/MEMORY.md`, referenced from
-> `.agentcubicle/AGENTS.md` and `.agentcubicle/CLAUDE.md`. Keep this
-> updated across sessions as a lightweight, tool-agnostic memory of where
-> things stand — update it as you go, not just at the end of a session.
-> Nothing here is ever committed, tracked, or shared with anyone who
-> clones the repo.
+> `agentcubicle` at `.agentcubicle/MEMORY.md`, imported into
+> `.agentcubicle/CLAUDE.md` (via an `@` include) and read by opencode
+> directly via its own `instructions` config entry. Keep this updated
+> across sessions as a lightweight, tool-agnostic memory of where things
+> stand — update it as you go, not just at the end of a session. Nothing
+> here is ever committed, tracked, or shared with anyone who clones the
+> repo.
 
 - **Current focus:** what's being worked on right now.
 - **Recent decisions:** choices made and the reasoning, so they aren't
@@ -663,15 +677,30 @@ CLAUDE_CONTENT=$(cat <<'CLAUDE_EOF'
 > Keep ONLY Claude-Code-specific instructions here — things that genuinely
 > don't apply to opencode or other tools. Everything else belongs in
 > `.agentcubicle/AGENTS.md` (general rules) or `.agentcubicle/MEMORY.md`
-> (working notes). **Read both of those too, at the start of every
-> session** — Claude Code doesn't discover AGENTS.md, or anything under
-> `.agentcubicle/`, on its own the way opencode does, so these pointers are
-> the only thing making that happen.
+> (working notes). Their content is inlined below via `@` imports, so you
+> already have it without needing a separate read — do not re-read either
+> file with a tool call, that just adds a needless round trip.
+
+@AGENTS.md
+@MEMORY.md
 
 ## Claude-Code-specific instructions
 
-(Nothing yet — add anything here that's genuinely specific to Claude Code
-and doesn't belong in the shared AGENTS.md/MEMORY.md.)
+These supersede AGENTS.md instructions.
+
+When updating agent rules, select the appropriate destination:
+
+For anything truly Claude-Code-specific:
+* If the instructions are specific to the agentcubicle container context: `.agentcubicle/CLAUDE.md`.
+* If not:
+  * If a git-tracked `CLAUDE.md` exists at the project level, ask the user where to put the instructions.
+  * Else `.agentcubicle/CLAUDE.md`.
+
+For anything not Claude-Code-specific, follow AGENTS.md's own instructions on
+this matter (same rules, with AGENTS.md as the target instead).
+
+(No project-specific Claude Code instructions yet — add any above as they
+come up.)
 CLAUDE_EOF
 )
 _seed_if_absent "$WORKDIR/.agentcubicle/CLAUDE.md" "$CLAUDE_CONTENT"
