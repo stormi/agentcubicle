@@ -108,6 +108,14 @@ _config_home() {
   fi
 }
 
+# Write $2 to $1 only if that path does not exist yet, so local edits made
+# in a previous run are never clobbered on the next one.
+_seed_if_absent() {
+  local target="$1"
+  local content="$2"
+  [[ -f "$target" ]] || printf '%s\n' "$content" > "$target"
+}
+
 # --- Phase 1: extract top-level subcommands (no tool context) ---
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -173,7 +181,7 @@ if [[ "$COMMAND" == "commit" ]]; then
   done
 fi
 
-# --- Phase 2: run mode — requires opencode ---
+# --- Phase 2: run mode — requires <opencode|claude> ---
 if [[ -z "$COMMAND" ]]; then
   if [[ $# -lt 1 ]] || [[ "$1" == "--" ]]; then
     echo "Error: First argument must be 'opencode' or 'claude'."
@@ -449,12 +457,20 @@ else
   CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME:/root${DOCKER_CONFIG_ROOT}:ro")
 fi
 
-# Container-only opencode config override (never touches host config): a
-# blanket permission allow. Combined with --agent plan below, this makes
-# plan mode best-effort rather than a hard guarantee — opencode's own
-# plan-agent rules deny edits, but this blanket allow is appended after
-# them in the resolved rule list, so it can win. Accepted trade-off.
-OPENCODE_CONFIG_JSON='{"permission":{"*":"allow"}}'
+# Container-only opencode config override (never touches host config), sent
+# via OPENCODE_CONFIG_CONTENT below. Two things live in it:
+# - A blanket permission allow. Combined with --agent plan below, this makes
+#   plan mode best-effort rather than a hard guarantee: opencode's own
+#   plan-agent rules deny edits, but this blanket allow is appended after
+#   them in the resolved rule list, so it can win. Accepted trade-off; see
+#   README "Permissions" for detail.
+# - An `instructions` entry pointing at the local AGENTS.md/MEMORY.md pair
+#   (see the .agentcubicle/ block below) — confirmed empirically that
+#   opencode merges `instructions` from OPENCODE_CONFIG_CONTENT with any
+#   file-based config's own `instructions` array rather than replacing it,
+#   so this is purely additive even when the project has its own AGENTS.md.
+OPENCODE_CONFIG_JSON=$(jq -nc --arg dir "$CONTAINER_PROJECT_DIR" \
+  '{"permission":{"*":"allow"},"instructions":[$dir + "/.agentcubicle/AGENTS.md", $dir + "/.agentcubicle/MEMORY.md"]}')
 
 # Forward a safe, curated subset of the host's global git config (identity +
 # a few UX settings) into the container. Allowlist, not blocklist, so we never
@@ -482,6 +498,163 @@ if [[ -s "$TMP_GITCONFIG" ]]; then
   HOST_GITCONFIG_B64="$(base64 -w0 < "$TMP_GITCONFIG")"
 fi
 rm -f "$TMP_GITCONFIG"
+
+# Local, persistent, git-excluded agent rules + memory, read by both tools
+# additively (even when the project already has its own tracked AGENTS.md/
+# CLAUDE.md). Deliberately never placed at the literal AGENTS.md/CLAUDE.md
+# paths: even a git-excluded symlink there is dangerous — if the upstream
+# remote later adds a real tracked file at that exact path, git refuses to
+# silently overwrite an existing untracked/excluded file during a merge or
+# pull ("untracked working tree file would be overwritten"), so it would
+# actively break the next `git pull`. `.git/info/exclude` only suppresses
+# `git status`/`git add` discovery; it does not grant git permission to
+# clobber a colliding path during merge.
+mkdir -p "$WORKDIR/.agentcubicle"
+
+AGENTS_CONTENT=$(cat <<'AGENTS_EOF'
+# AGENTS.md (agentcubicle local file)
+
+> Local-only, machine-specific file maintained by `agentcubicle` at
+> `.agentcubicle/AGENTS.md`. opencode reads it automatically (via its global
+> config's `instructions` list), *in addition to* any AGENTS.md the project
+> itself already has — this is supplementary, never a replacement. Claude
+> Code doesn't read AGENTS.md natively; see `.agentcubicle/CLAUDE.md`
+> (exposed as `CLAUDE.local.md`) for how it's wired in there instead.
+> Nothing here is ever committed, tracked, or shared with anyone who clones
+> the repo.
+
+## Rules
+
+- Never push to a remote, or suggest pushing (e.g. offering "push to
+  origin" as a follow-up after a commit). This container's workflow is
+  commit-only: pushing happens on the host, by the user, after
+  reviewing what was committed.
+
+General, tool-agnostic agent rules and conventions for this project go
+here. Keep Claude-Code-only instructions in `.agentcubicle/CLAUDE.md` instead.
+
+## Memory
+
+Three places for information to live, each with a different purpose and
+lifetime — know which one something belongs in:
+
+- **`.agentcubicle/MEMORY.md`** is temporary work memory, not permanent
+  documentation. It exists purely for continuity across sessions and
+  should hold only:
+  - **Current focus**: what's being worked on right now, if anything.
+  - **Recent decisions**: choices made recently and their reasoning, so
+    they aren't re-litigated next session — until captured permanently
+    elsewhere or no longer relevant.
+  - **Open threads**: questions, TODOs, or half-finished work to pick
+    back up.
+  Update it as you go, not just at the end of a session.
+- **`README.md`** is user-facing documentation: how to use this project,
+  what it does, configuration, behavior a user needs to know.
+- **`docs/DESIGN.md`** (and any `docs/DESIGN/*.md` files it references)
+  holds design rationale and architecture decisions — the durable "why"
+  behind non-obvious choices, git-tracked and permanent, rather than
+  buried in commit messages or lost the next time MEMORY.md gets
+  cleaned up. If the project already has its own established design-doc
+  convention (an `ARCHITECTURE.md`, `docs/adr/`, etc.), use that instead
+  of introducing a new location — ask the user if it's unclear which to
+  prefer. If neither `docs/DESIGN.md` nor an equivalent exists, **ask the
+  user before creating it** — do not create it unilaterally. `docs/` may
+  already serve some other, unrelated purpose in this particular
+  project (a docs site, API reference, etc.), so its absence or a
+  differently-used `docs/` is a real signal to check, not just proceed.
+
+Clean up MEMORY.md regularly, not just when it gets unwieldy: once
+something is captured permanently in README.md or the design docs, or is
+resolved/no longer relevant, trim or compress it out rather than letting
+it accumulate indefinitely. When unsure whether to delete or keep,
+condense to a one-line summary instead of deleting outright.
+
+Regularly — not only when explicitly asked — look back over what has
+stacked up in MEMORY.md and in recent git history, and use it to update
+README.md and the design docs with anything that deserves to live there
+permanently. Then clean up MEMORY.md accordingly.
+AGENTS_EOF
+)
+_seed_if_absent "$WORKDIR/.agentcubicle/AGENTS.md" "$AGENTS_CONTENT"
+
+MEMORY_CONTENT=$(cat <<'MEMORY_EOF'
+# MEMORY.md (agentcubicle local file)
+
+> Local-only, machine-specific continuity notes maintained by
+> `agentcubicle` at `.agentcubicle/MEMORY.md`, referenced from
+> `.agentcubicle/AGENTS.md` and `.agentcubicle/CLAUDE.md`. Keep this
+> updated across sessions as a lightweight, tool-agnostic memory of where
+> things stand — update it as you go, not just at the end of a session.
+> Nothing here is ever committed, tracked, or shared with anyone who
+> clones the repo.
+
+- **Current focus:** what's being worked on right now.
+- **Recent decisions:** choices made and the reasoning, so they aren't
+  re-litigated next session.
+- **Open threads:** questions, TODOs, or half-finished work to pick back up.
+MEMORY_EOF
+)
+_seed_if_absent "$WORKDIR/.agentcubicle/MEMORY.md" "$MEMORY_CONTENT"
+
+CLAUDE_CONTENT=$(cat <<'CLAUDE_EOF'
+# CLAUDE.md (agentcubicle local file, Claude-Code-specific)
+
+> Local-only, machine-specific file maintained by `agentcubicle` at
+> `.agentcubicle/CLAUDE.md`, exposed at the project root as `CLAUDE.local.md`
+> (a symlink). Claude Code loads `CLAUDE.local.md` automatically every
+> session. Nothing here is ever committed, tracked, or shared with anyone
+> who clones the repo.
+>
+> Keep ONLY Claude-Code-specific instructions here — things that genuinely
+> don't apply to opencode or other tools. Everything else belongs in
+> `.agentcubicle/AGENTS.md` (general rules) or `.agentcubicle/MEMORY.md`
+> (working notes). **Read both of those too, at the start of every
+> session** — Claude Code doesn't discover AGENTS.md, or anything under
+> `.agentcubicle/`, on its own the way opencode does, so these pointers are
+> the only thing making that happen.
+
+## Claude-Code-specific instructions
+
+(Nothing yet — add anything here that's genuinely specific to Claude Code
+and doesn't belong in the shared AGENTS.md/MEMORY.md.)
+CLAUDE_EOF
+)
+_seed_if_absent "$WORKDIR/.agentcubicle/CLAUDE.md" "$CLAUDE_CONTENT"
+# CLAUDE.local.md is a relative symlink so Claude Code picks it up
+# automatically every session (matches CLAUDE.md's own documented symlink
+# convention). The -L check guards against a previously-created dangling
+# symlink making `ln -s` fail outright.
+if [[ ! -e "$WORKDIR/CLAUDE.local.md" && ! -L "$WORKDIR/CLAUDE.local.md" ]]; then
+  ln -s .agentcubicle/CLAUDE.md "$WORKDIR/CLAUDE.local.md"
+fi
+
+# Register the persistent Claude state directory and the local files above
+# in the repo's local, never-committed git-exclude file — NOT .gitignore,
+# which is tracked and would leak which tool/container setup this repo uses
+# to anyone who clones it. Applies regardless of which tool is running.
+# No-op if the project isn't a git repo. Resolved via --git-common-dir
+# (rather than checking `-d "$WORKDIR/.git"`) so this also works inside a
+# git worktree or submodule, where `.git` is a file pointing elsewhere, not
+# a directory. Guarded by --show-toplevel so this only fires when $WORKDIR
+# is itself a repo/worktree root — otherwise --git-common-dir would walk up
+# and find an unrelated parent repo when $WORKDIR is a plain subdirectory
+# with no .git of its own, and register the exclude entries against the
+# wrong root.
+GIT_TOPLEVEL="$(git -C "$WORKDIR" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "$GIT_TOPLEVEL" ]] && [[ "$GIT_TOPLEVEL" -ef "$WORKDIR" ]]; then
+  GIT_COMMON_DIR="$(git -C "$WORKDIR" rev-parse --git-common-dir)"
+  case "$GIT_COMMON_DIR" in
+    /*) : ;;
+    *) GIT_COMMON_DIR="$WORKDIR/$GIT_COMMON_DIR" ;;
+  esac
+  EXCLUDE_FILE="$GIT_COMMON_DIR/info/exclude"
+  mkdir -p "$(dirname "$EXCLUDE_FILE")"
+  for entry in '/.agentcubicle/' '/CLAUDE.local.md'; do
+    if ! grep -qxF "$entry" "$EXCLUDE_FILE" 2>/dev/null; then
+      printf '%s\n' "$entry" >> "$EXCLUDE_FILE"
+    fi
+  done
+fi
 
 # Auto-detect clipboard/display backend and mount appropriate socket
 if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${XDG_RUNTIME_DIR:-}" && -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]]; then
@@ -532,19 +705,26 @@ fi
 # (see the single-quoting around OPENCODE_CONFIG_CONTENT).
 GIT_SETUP='if [ -n "$HOST_GITCONFIG_B64" ]; then printf %s "$HOST_GITCONFIG_B64" | base64 -d > "$HOME/.gitconfig-forwarded" && git config --global include.path "$HOME/.gitconfig-forwarded"; fi; git config --global --add safe.directory '"$CONTAINER_PROJECT_DIR"'; '
 
+# Sent as the tool's first turn so the "announce what you read" instruction
+# in AGENTS.md/CLAUDE.md actually has a chance to fire: an interactive TUI
+# never gives the model an unprompted turn, so without this the loaded
+# instructions just sit there until the user happens to say something.
+# Explicitly asks for a quick, non-deliberative first answer, scoped to
+# just this one message - it does not touch any model/thinking settings,
+# so nothing about later turns is affected.
+# No apostrophes/quotes in this text — it survives through the same
+# su -c reparse as everything else in INNER_CMD.
+KICKOFF_PROMPT='Without spending extra time deliberating, briefly tell me which of your local instructions and memory files you have and give a quick one paragraph summary of what is in them, then stop and wait for what is next.'
+
 if [[ "$TOOL" == "opencode" ]]; then
-  INNER_CMD="$GIT_SETUP export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; exec opencode --agent plan \"\$@\""
+  INNER_CMD="$GIT_SETUP export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; exec opencode --agent plan --prompt '$KICKOFF_PROMPT' \"\$@\""
 else
-  INNER_CMD="$GIT_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; exec claude --permission-mode plan \"\$@\""
+  INNER_CMD="$GIT_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; exec claude --permission-mode plan \"\$@\" '$KICKOFF_PROMPT'"
 fi
 INNER_B64=$(printf '%s' "$INNER_CMD" | base64 -w0)
 
 echo "Starting container: ${CONTAINER_NAME}"
 
-# The container's $HOME (/home/user) is throwaway scratch space, discarded
-# when the container exits; the project is bind-mounted at a clearly
-# separate child path (/home/user/project) so it's never ambiguous which
-# files are ephemeral container state and which are the user's real work.
 # Container starts as root → remaps `user` UID/GID to host → su's to user.
 docker run -it \
   --name "$CONTAINER_NAME" \
@@ -553,7 +733,7 @@ docker run -it \
   -v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw" \
   ${CONFIG_HOME_MOUNT_ARGS[@]+"${CONFIG_HOME_MOUNT_ARGS[@]}"} \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
-  -e HOME=/home/user \
+  -e HOME=/root \
   -e "HOST_UID=$(id -u)" \
   -e "HOST_GID=$(id -g)" \
   -e "INNER_B64=$INNER_B64" \
@@ -600,7 +780,7 @@ docker run -it \
    # UID/GID on disk, so recursing into them would only waste time and
    # needlessly touch every inode of the actual project tree.
    find /home/user -mindepth 1 -maxdepth 1 ! -name project ! -name .Xauthority -exec chown -R $HOST_UID:$HOST_GID {} +
-   export HOME=/home/user
-   CMD=$(echo "$INNER_B64" | base64 -d)
-   exec su -s /bin/sh -c "export PATH=\"/home/user/.local/bin:\$PATH\"; $CMD" user _ "$@"' \
+    export HOME=/home/user
+    CMD=$(echo "$INNER_B64" | base64 -d)
+    exec su -s /bin/sh -c "export PATH=\"/home/user/.local/bin:\$PATH\"; $CMD" user _ "$@"' \
   _ ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
