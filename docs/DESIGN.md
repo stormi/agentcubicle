@@ -216,6 +216,23 @@ today's plain mount-and-copy behavior in that case rather than attempt
 a regex-based rewrite that could silently corrupt or fail to redact a
 config.
 
+## Scope: opencode session state is not persisted
+
+Claude Code's per-project state is persisted via `CLAUDE_CONFIG_DIR`
+(see "Claude Code project state persistence" above), but there is
+deliberately no equivalent for opencode. opencode keeps its data and
+state — sessions/history, provider credentials (`auth.json`), and other
+state — under `~/.local/share/opencode` and `~/.local/state/opencode`,
+both of which live under the container's ephemeral `/home/user` home and
+are therefore discarded when the container exits.
+
+This is a conscious scope decision, not an oversight: persistence was
+built for claude because that is what was needed, and it is unclear
+opencode has per-project state worth the same treatment. If it turns out
+to matter, the same pattern applies — point opencode's data/state dirs
+(via `XDG_DATA_HOME` / `XDG_STATE_HOME`, or bind mounts) at a location
+inside the project mount, never at host paths outside it.
+
 ## Commits, not pushes
 
 The workflow this tool is designed for is commit-only inside the
