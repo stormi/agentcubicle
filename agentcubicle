@@ -99,6 +99,15 @@ _generate_name() {
   echo "ac-${sanitized}-${rand}"
 }
 
+# Determine config home directory based on tool
+_config_home() {
+  if [[ "$TOOL" == "opencode" ]]; then
+    echo "$HOME/.config/opencode"
+  else
+    echo "$HOME/.claude"
+  fi
+}
+
 # --- Phase 1: extract top-level subcommands (no tool context) ---
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -420,6 +429,26 @@ if [[ -n "$CMD_NAME" ]]; then
   docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 fi
 
+CONFIG_HOME="$(_config_home)"
+DOCKER_CONFIG_ROOT="${CONFIG_HOME#"$HOME"}"
+
+# For claude, mount only settings.json (the one file the entrypoint ever
+# reads from here) rather than the whole ~/.claude directory, so the
+# oauth-token file (and the raw .credentials.json) never enter the
+# container's mount namespace at all - the oauth token is already forwarded
+# separately as an env var below. Guarded on existence: bind-mounting a
+# single file that does not yet exist on the host causes Docker to create
+# an empty directory there instead, which would corrupt a future
+# `claude setup-token` save.
+CONFIG_HOME_MOUNT_ARGS=()
+if [[ "$TOOL" == "claude" ]]; then
+  if [[ -f "$CONFIG_HOME/settings.json" ]]; then
+    CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME/settings.json:/root/.claude/settings.json:ro")
+  fi
+else
+  CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME:/root${DOCKER_CONFIG_ROOT}:ro")
+fi
+
 # Container-only opencode config override (never touches host config): a
 # blanket permission allow. Combined with --agent plan below, this makes
 # plan mode best-effort rather than a hard guarantee — opencode's own
@@ -483,6 +512,7 @@ docker run -it \
   --entrypoint sh \
   -w "$CONTAINER_PROJECT_DIR" \
   -v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw" \
+  ${CONFIG_HOME_MOUNT_ARGS[@]+"${CONFIG_HOME_MOUNT_ARGS[@]}"} \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
   -e HOME=/home/user \
   -e "HOST_UID=$(id -u)" \
@@ -494,6 +524,16 @@ docker run -it \
   -c \
   'groupmod -g $HOST_GID user
    usermod -u $HOST_UID user
+   mkdir -p /home/user/.config/opencode
+   if [ -f /root/.config/opencode/opencode.json ]; then
+     cp /root/.config/opencode/opencode.json /home/user/.config/opencode/
+   elif [ -f /root/.config/opencode/opencode.jsonc ]; then
+     cp /root/.config/opencode/opencode.jsonc /home/user/.config/opencode/
+   fi
+   if [ "$TOOL" = "claude" ] && [ -f /root/.claude/settings.json ]; then
+     mkdir -p /home/user/.claude
+     cp /root/.claude/settings.json /home/user/.claude/
+   fi
    chown $HOST_UID:$HOST_GID /home/user
    # Skip project (the project bind mount) and .Xauthority (a host file
    # mounted read-write for X11 forwarding): both already carry the host
