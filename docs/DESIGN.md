@@ -201,20 +201,28 @@ just an API key) while the self-hosted case needs the fuller shape
 (`npm`, `name`, a custom `models` catalog) and benefits more from a
 worked example.
 
-**Considered, not yet built**: auto-detecting literal (non-`{env:...}`)
-API keys already present in a user's existing config, rewriting them to
-a synthetic `{env:GENERATED_NAME}` reference in a container-only copy,
-and forwarding the real value via a generated env var — so a user with
-a personally-managed config containing literal keys doesn't have to
-hand-convert it to the `{env:VAR}` shape themselves. This would also
-close a real usability/security tension: a literal secret typed
-directly into a `--env` flag lands in shell history, while one read
-silently from a config file by the script never does. The open
-question blocking this is `.jsonc` files with comments, which `jq`
-cannot parse or safely rewrite — the design intends to fall back to
-today's plain mount-and-copy behavior in that case rather than attempt
-a regex-based rewrite that could silently corrupt or fail to redact a
-config.
+**Literal API keys are auto-redacted.** If the host opencode config sets
+a provider's `options.apiKey` to a literal value (not a `{env:...}` or
+`{file:...}` reference), agentcubicle forwards the real value into the
+container as a generated env var (`AC_OPENCODE_<PROVIDER>_APIKEY`) and
+feeds the container a redacted copy of the config that references
+`{env:<that var>}` instead. The literal therefore never lands in the
+container's writable config copy (so it can't be captured by a
+`docker commit`), and a user who keeps a literal key in their own config
+doesn't have to hand-convert it to the `{env:VAR}` shape — nor type it
+into a `--env` flag, where it would land in shell history. When
+redaction applies, the raw config file is not mounted into the container
+at all: the redacted copy is injected via a base64 env var and written
+by the entrypoint, so even the container's read-only mount namespace
+never sees the literal.
+
+This is only attempted when `jq` can parse the config. A `.jsonc` file
+with comments (which `jq` cannot parse) is deliberately left untouched
+and falls back to the plain mount-and-copy path — attempting a
+regex-based rewrite risks silently corrupting the config or failing to
+redact, which would be worse than not redacting at all. Detection is
+per-provider and keys off literal-vs-reference, so configs already using
+`{env:...}`/`{file:...}` are unaffected.
 
 ## Scope: opencode session state is not persisted
 

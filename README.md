@@ -68,6 +68,8 @@ The same `{env:VAR}` + `--env` pattern works for a hosted vendor too — opencod
 
 Note that `opencode auth login` does **not** work for this: it stores credentials at `~/.local/share/opencode/auth.json`, which agentcubicle never mounts or copies into the container (only `~/.config/opencode` is) — anything saved there never reaches a session. The config-file-plus-`--env` approach above is the one that actually works, and is verified against a real `opencode debug config` resolution.
 
+**Literal keys are handled automatically too.** If you'd rather just keep a literal key in your `opencode.json` (as many personally-managed configs do), you don't have to convert it to `{env:VAR}` yourself: agentcubicle detects any literal `provider.*.options.apiKey`, forwards the real value into the container as a generated `AC_OPENCODE_<PROVIDER>_APIKEY` env var, and gives the container a redacted copy of the config that references it. So the literal never lands in the container's config copy (nor in your shell history, since it's read from the file rather than typed into `--env`). This applies only when the config is valid JSON `jq` can parse — a `.jsonc` with comments is left as-is, keeping its literal key.
+
 If your config has no `provider` section at all, `agentcubicle opencode` prints a reminder about this every time you start a session.
 
 ## First-time Claude Code authentication

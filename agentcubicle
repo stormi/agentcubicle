@@ -440,6 +440,40 @@ fi
 CONFIG_HOME="$(_config_home)"
 DOCKER_CONFIG_ROOT="${CONFIG_HOME#"$HOME"}"
 
+# Auto-redact literal API keys from the host opencode config. If a
+# provider's options.apiKey is a literal value (not a {env:...} or
+# {file:...} reference), forward the real value into the container as a
+# generated env var and feed the container a redacted copy of the config
+# that references {env:NAME} instead — so the literal key never lands in
+# the container's writable config copy (or a `docker commit` of it), and a
+# user who keeps a literal key in their own config needn't hand-convert it
+# to the {env:VAR} shape. Only attempted when jq can parse the file; a
+# .jsonc with comments is left untouched for the plain mount+copy path.
+OPENCODE_REDACTED_B64=""
+OPENCODE_REDACTED_BASENAME=""
+if [[ "$TOOL" == "opencode" ]]; then
+  for cfg in "$CONFIG_HOME/opencode.json" "$CONFIG_HOME/opencode.jsonc"; do
+    [[ -f "$cfg" ]] || continue
+    jq -e . "$cfg" >/dev/null 2>&1 || break
+    redacted="$(cat "$cfg")"
+    while IFS= read -r prov; do
+      [[ -z "$prov" ]] && continue
+      var="AC_OPENCODE_$(printf '%s' "$prov" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')_APIKEY"
+      val="$(printf '%s' "$redacted" | jq -r --arg p "$prov" '.provider[$p].options.apiKey')"
+      EXTRA_ENVS+=("-e" "$var=$val")
+      redacted="$(printf '%s' "$redacted" | jq --arg p "$prov" --arg v "$var" '.provider[$p].options.apiKey = "{env:" + $v + "}"')"
+    done < <(jq -r '.provider // {} | to_entries[]
+                    | select((.value.options.apiKey? | type) == "string")
+                    | select((.value.options.apiKey | test("^\\{(env|file):[^}]*\\}$")) | not)
+                    | .key' "$cfg")
+    if [[ "$redacted" != "$(cat "$cfg")" ]]; then
+      OPENCODE_REDACTED_B64="$(printf '%s' "$redacted" | base64 -w0)"
+      OPENCODE_REDACTED_BASENAME="$(basename "$cfg")"
+    fi
+    break
+  done
+fi
+
 # For claude, mount only settings.json (the one file the entrypoint ever
 # reads from here) rather than the whole ~/.claude directory, so the
 # oauth-token file (and the raw .credentials.json) never enter the
@@ -453,7 +487,11 @@ if [[ "$TOOL" == "claude" ]]; then
   if [[ -f "$CONFIG_HOME/settings.json" ]]; then
     CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME/settings.json:/root/.claude/settings.json:ro")
   fi
-else
+elif [[ -z "$OPENCODE_REDACTED_B64" ]]; then
+  # opencode without redaction: mount the host config dir read-only as the
+  # copy source. When redaction applies, the config is injected via
+  # OPENCODE_REDACTED_B64 instead, so the raw file — literal key and all —
+  # never enters the container's mount namespace either.
   CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME:/root${DOCKER_CONFIG_ROOT}:ro")
 fi
 
@@ -722,6 +760,10 @@ if [[ -n "$HOST_GITCONFIG_B64" ]]; then
   EXTRA_ENVS+=("-e" "HOST_GITCONFIG_B64=$HOST_GITCONFIG_B64")
 fi
 
+if [[ -n "$OPENCODE_REDACTED_B64" ]]; then
+  EXTRA_ENVS+=("-e" "OPENCODE_REDACTED_B64=$OPENCODE_REDACTED_B64" "-e" "OPENCODE_REDACTED_BASENAME=$OPENCODE_REDACTED_BASENAME")
+fi
+
 # Build the inner command that runs as `user` (non-root).
 # Base64-encode it to avoid nested quoting issues across shell boundaries.
 #
@@ -809,7 +851,9 @@ docker run -it \
   'groupmod -g $HOST_GID user
    usermod -u $HOST_UID user
    mkdir -p /home/user/.config/opencode
-   if [ -f /root/.config/opencode/opencode.json ]; then
+   if [ -n "$OPENCODE_REDACTED_B64" ]; then
+     printf %s "$OPENCODE_REDACTED_B64" | base64 -d > "/home/user/.config/opencode/$OPENCODE_REDACTED_BASENAME"
+   elif [ -f /root/.config/opencode/opencode.json ]; then
      cp /root/.config/opencode/opencode.json /home/user/.config/opencode/
    elif [ -f /root/.config/opencode/opencode.jsonc ]; then
      cp /root/.config/opencode/opencode.jsonc /home/user/.config/opencode/
