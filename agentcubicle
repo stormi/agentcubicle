@@ -1,0 +1,375 @@
+#!/bin/bash
+# Run opencode in an isolated Docker container, starting in a read-only
+# plan mode you manually escalate out of. Project files are mounted read-write.
+#
+# Usage:
+#   agentcubicle setup [--clear]                          # Build the image with dev tools
+#   agentcubicle check [--img IMAGE]                     # Inspect image for required tools
+#   agentcubicle commit [--name NAME]                     # Commit running container
+#   agentcubicle cleanup                                  # Remove stopped containers
+#   agentcubicle opencode [--mount MOUNT] [--env ENV] [--img IMAGE] [--name NAME] [--] [tool args...]
+#
+# Examples:
+#   agentcubicle setup
+#   agentcubicle setup --clear
+#   agentcubicle check
+#   agentcubicle cleanup
+#   agentcubicle opencode
+#   agentcubicle opencode --name my-session
+#   agentcubicle opencode --mount /etc/ssh:/etc/ssh:ro
+#   agentcubicle opencode -- --model claude-sonnet-4
+
+set -euo pipefail
+
+WORKDIR="$(pwd)"
+COMMIT_TARGET="agentcubicle"
+EXTRA_MOUNTS=()
+EXTRA_ENVS=()
+EXTRA_ARGS=()
+PARSE_DASHDASH=false
+CLEAR=false
+COMMAND=""
+TOOL=""
+CMD_NAME=""
+
+# Packages and the binary to check for them. Format: "package:binary"
+# If no colon, the binary has the same name as the package.
+REQUIRED_PACKAGES=(
+  "bat"
+  "build-base:make"
+  "cgdb"
+  "curl"
+  "curlie"
+  "diffutils:diff"
+  "file"
+  "fzf"
+  "gcc"
+  "g++"
+  "gdb"
+  "gdb-dashboard:gdb"
+  "git"
+  "htop"
+  "httpie"
+  "jq"
+  "lua5.4"
+  "luajit"
+  "lsof"
+  "nano"
+  "netcat-openbsd:nc"
+  "nmap"
+  "nodejs:node"
+  "npm"
+  "patch"
+  "perl"
+  "python3"
+  "py3-pip:pip3"
+  "shellcheck"
+  "sqlite"
+  "strace"
+  "tcpdump"
+  "tmux"
+  "tree"
+  "valgrind"
+  "vim"
+  "wl-clipboard:wl-copy"
+  "wrk"
+  "xclip"
+)
+
+# Resolve binary name for a package entry: "pkg:bin" → bin, "pkg" → pkg
+_pkg_to_bin() {
+  echo "${1#*:}"
+}
+
+# Default image for `check` and run
+IMAGE="$COMMIT_TARGET"
+
+# Generate unique container name: ac-<project>-<random>
+_generate_name() {
+  local sanitized
+  sanitized="$(basename "$WORKDIR" | sed 's/[^a-zA-Z0-9_-]/-/g')"
+  local rand
+  rand="$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')"
+  echo "ac-${sanitized}-${rand}"
+}
+
+# --- Phase 1: extract top-level subcommands (no tool context) ---
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    setup|check|commit|cleanup)
+      COMMAND="$1"
+      shift
+      ;;
+  esac
+fi
+
+# Parse `setup` flags
+if [[ "$COMMAND" == "setup" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --clear)
+        CLEAR=true
+        shift
+        ;;
+      *)
+        echo "Error: unknown argument '$1' for setup."
+        echo "Usage: agentcubicle setup [--clear]"
+        exit 1
+        ;;
+    esac
+  done
+fi
+
+# Parse `check` flags
+if [[ "$COMMAND" == "check" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --img)
+        IMAGE="$2"
+        shift 2
+        ;;
+      *)
+        echo "Error: unknown argument '$1' for check."
+        echo "Usage: agentcubicle check [--img IMAGE]"
+        exit 1
+        ;;
+    esac
+  done
+fi
+
+# Parse `commit` flags
+if [[ "$COMMAND" == "commit" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --name)
+        CMD_NAME="$2"
+        shift 2
+        ;;
+      *)
+        echo "Error: unknown argument '$1' for commit."
+        echo "Usage: agentcubicle commit [--name NAME]"
+        exit 1
+        ;;
+    esac
+  done
+fi
+
+# --- Phase 2: run mode — requires opencode ---
+if [[ -z "$COMMAND" ]]; then
+  if [[ $# -lt 1 ]] || [[ "$1" == "--" ]]; then
+    echo "Error: First argument must be 'opencode'."
+    echo ""
+    echo "Usage: agentcubicle opencode [options...] [--] [tool args...]"
+    echo "       agentcubicle setup [--clear]"
+    echo "       agentcubicle check [--img IMAGE]"
+    echo "       agentcubicle commit [--name NAME]"
+    echo "       agentcubicle cleanup"
+    exit 1
+  fi
+
+  TOOL="$1"
+  shift
+
+  if [[ "$TOOL" != "opencode" ]]; then
+    echo "Error: Unknown tool '$TOOL'. Must be 'opencode'."
+    exit 1
+  fi
+
+  # Parse remaining arguments for run
+  while [[ $# -gt 0 ]]; do
+    if $PARSE_DASHDASH; then
+      EXTRA_ARGS+=("$1")
+      shift
+      continue
+    fi
+
+    case $1 in
+      --name)
+        CMD_NAME="$2"
+        shift 2
+        ;;
+      --img)
+        IMAGE="$2"
+        shift 2
+        ;;
+      --mount)
+        EXTRA_MOUNTS+=("-v" "$2")
+        shift 2
+        ;;
+      --env)
+        EXTRA_ENVS+=("-e" "$2")
+        shift 2
+        ;;
+      --)
+        PARSE_DASHDASH=true
+        shift
+        ;;
+      *)
+        EXTRA_ARGS+=("$1")
+        shift
+        ;;
+    esac
+  done
+fi
+
+# --- subcommand handlers ---
+
+# -- setup: build custom image with dev tools and clipboard --
+if [[ "$COMMAND" == "setup" ]]; then
+  # Remove existing image first if --clear is set
+  if $CLEAR; then
+    docker image rm -f "$COMMIT_TARGET" >/dev/null 2>/dev/null || true
+  fi
+
+  NO_CACHE_ARGS=()
+  if $CLEAR; then
+    NO_CACHE_ARGS=(--no-cache)
+  fi
+
+  if docker image inspect "$COMMIT_TARGET" >/dev/null 2>&1; then
+    echo "Image $COMMIT_TARGET is ready."
+    exit 0
+  fi
+
+  PKG_NAMES=()
+  for entry in "${REQUIRED_PACKAGES[@]}"; do
+    PKG_NAMES+=("${entry%%:*}")
+  done
+
+  echo "Building $COMMIT_TARGET with dev tools ..."
+  docker build --progress=plain ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} --build-arg PACKAGES="${PKG_NAMES[*]}" -t "$COMMIT_TARGET" - < <(
+    cat <<'EOF'
+FROM ghcr.io/anomalyco/opencode
+ARG PACKAGES
+RUN apk add --no-cache $PACKAGES bash libgcc libstdc++ ripgrep shadow
+RUN addgroup -g 1000 user 2>/dev/null || true
+RUN adduser -u 1000 -G user -D -h /home/user user 2>/dev/null || true
+RUN mkdir -p /usr/local/bin
+ENV PATH="/usr/local/bin:$PATH"
+ENV USE_BUILTIN_RIPGREP=0
+EOF
+  )
+  echo "Done. Image '$COMMIT_TARGET' is ready."
+  exit 0
+fi
+
+# -- check: inspect image for required tools --
+if [[ "$COMMAND" == "check" ]]; then
+  _ok() { echo "  ✓ $1"; }
+  _missing() { echo "  ✗ $1 (missing)"; }
+
+  echo "Checking image '$IMAGE' ..."
+  MISSING=0
+
+  for entry in "${REQUIRED_PACKAGES[@]}"; do
+    PKG="${entry%%:*}"
+    BIN="$(_pkg_to_bin "$entry")"
+    if docker run --entrypoint sh --rm "$IMAGE" -c "command -v $BIN >/dev/null" 2>/dev/null; then
+      _ok "$PKG"
+    else
+      _missing "$PKG"
+      MISSING=1
+    fi
+  done
+
+  if [[ "$MISSING" -eq 1 ]]; then
+    echo ""
+    echo "Run 'agentcubicle setup' to install missing tools into $COMMIT_TARGET."
+  fi
+  exit 0
+fi
+
+# -- cleanup --
+if [[ "$COMMAND" == "cleanup" ]]; then
+  for cid in $(docker ps -a --filter 'name=^ac-' --filter 'status=exited' --format '{{.ID}}' 2>/dev/null || true); do
+    docker rm "$cid"
+  done
+  exit 0
+fi
+
+# -- commit --
+if [[ "$COMMAND" == "commit" ]]; then
+  if [[ -n "$CMD_NAME" ]]; then
+    docker commit "$CMD_NAME" "$COMMIT_TARGET"
+    exit 0
+  fi
+
+  # List running ac-* containers
+  CONTAINERS=$(docker ps --filter 'name=^ac-' --format '{{.Names}}' 2>/dev/null || true)
+  if [[ -z "$CONTAINERS" ]]; then
+    echo "No running containers prefixed with 'ac-' found."
+    exit 1
+  fi
+
+  echo "Running containers:"
+  IDX=1
+  NAMES=()
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    NAMES+=("$name")
+    echo "  ${IDX}) ${name}"
+    IDX=$((IDX + 1))
+  done <<< "$CONTAINERS"
+
+  if [[ ! -t 0 ]]; then
+    echo "Error: no tty available. Use --name to specify a container (not interactive)."
+    exit 1
+  fi
+
+  echo -n "Pick a container [1]: "
+  read -r REPLY_CHOICE
+  CHOICE="${REPLY_CHOICE:-1}"
+
+  if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [[ "$CHOICE" -lt 1 || "$CHOICE" -gt "${#NAMES[@]}" ]]; then
+    echo "Invalid choice."
+    exit 1
+  fi
+
+  docker commit "${NAMES[$((CHOICE - 1))]}" "$COMMIT_TARGET"
+  exit 0
+fi
+
+# --- Normal mode: start a container ---
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "Error: $IMAGE image not found."
+  if [[ "$IMAGE" == "$COMMIT_TARGET" ]]; then
+    echo "Run 'agentcubicle setup' first."
+  fi
+  exit 1
+fi
+
+CONTAINER_NAME="${CMD_NAME:-$(_generate_name)}"
+
+# Remove only if a name was explicitly provided (re-use same name)
+if [[ -n "$CMD_NAME" ]]; then
+  docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+fi
+
+# Container-only opencode config override (never touches host config): a
+# blanket permission allow. Combined with --agent plan below, this makes
+# plan mode best-effort rather than a hard guarantee — opencode's own
+# plan-agent rules deny edits, but this blanket allow is appended after
+# them in the resolved rule list, so it can win. Accepted trade-off.
+OPENCODE_CONFIG_JSON='{"permission":{"*":"allow"}}'
+
+echo "Starting container: ${CONTAINER_NAME}"
+
+# Container starts as root → remaps `user` UID/GID to host → su's to user.
+docker run -it \
+  --name "$CONTAINER_NAME" \
+  --entrypoint sh \
+  -w /work \
+  -v "$WORKDIR:/work:rw" \
+  ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
+  -e HOME=/work \
+  -e "HOST_UID=$(id -u)" \
+  -e "HOST_GID=$(id -g)" \
+  -e "OPENCODE_CONFIG_CONTENT=$OPENCODE_CONFIG_JSON" \
+  ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"} \
+  "$IMAGE" \
+  -c \
+  'groupmod -g $HOST_GID user
+   usermod -u $HOST_UID user
+   chown -R $HOST_UID:$HOST_GID /work
+   exec su -s /bin/sh -c "cd /work; export PATH=\"/home/user/.local/bin:\$PATH\"; exec opencode --agent plan \"\$@\"" user _ "$@"' \
+  _ ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
