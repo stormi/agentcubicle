@@ -22,6 +22,7 @@
 set -euo pipefail
 
 WORKDIR="$(pwd)"
+CONTAINER_PROJECT_DIR="/home/user/project"
 COMMIT_TARGET="agentcubicle"
 EXTRA_MOUNTS=()
 EXTRA_ENVS=()
@@ -352,16 +353,33 @@ fi
 # them in the resolved rule list, so it can win. Accepted trade-off.
 OPENCODE_CONFIG_JSON='{"permission":{"*":"allow"}}'
 
+# Auto-detect clipboard/display backend and mount appropriate socket
+if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${XDG_RUNTIME_DIR:-}" && -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]]; then
+  EXTRA_MOUNTS+=("-v" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY")
+  EXTRA_ENVS+=("-e" "WAYLAND_DISPLAY=$WAYLAND_DISPLAY" "-e" "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR")
+elif [[ -n "${DISPLAY:-}" ]]; then
+  EXTRA_MOUNTS+=("-v" "/tmp/.X11-unix:/tmp/.X11-unix")
+  if [[ -n "${XAUTHORITY:-}" && -f "$XAUTHORITY" ]]; then
+    EXTRA_MOUNTS+=("-v" "$XAUTHORITY:/home/user/.Xauthority")
+    EXTRA_ENVS+=("-e" "XAUTHORITY=/home/user/.Xauthority")
+  fi
+  EXTRA_ENVS+=("-e" "DISPLAY=$DISPLAY")
+fi
+
 echo "Starting container: ${CONTAINER_NAME}"
 
+# The container's $HOME (/home/user) is throwaway scratch space, discarded
+# when the container exits; the project is bind-mounted at a clearly
+# separate child path (/home/user/project) so it's never ambiguous which
+# files are ephemeral container state and which are the user's real work.
 # Container starts as root → remaps `user` UID/GID to host → su's to user.
 docker run -it \
   --name "$CONTAINER_NAME" \
   --entrypoint sh \
-  -w /work \
-  -v "$WORKDIR:/work:rw" \
+  -w "$CONTAINER_PROJECT_DIR" \
+  -v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw" \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
-  -e HOME=/work \
+  -e HOME=/home/user \
   -e "HOST_UID=$(id -u)" \
   -e "HOST_GID=$(id -g)" \
   -e "OPENCODE_CONFIG_CONTENT=$OPENCODE_CONFIG_JSON" \
@@ -370,6 +388,12 @@ docker run -it \
   -c \
   'groupmod -g $HOST_GID user
    usermod -u $HOST_UID user
-   chown -R $HOST_UID:$HOST_GID /work
-   exec su -s /bin/sh -c "cd /work; export PATH=\"/home/user/.local/bin:\$PATH\"; exec opencode --agent plan \"\$@\"" user _ "$@"' \
+   chown $HOST_UID:$HOST_GID /home/user
+   # Skip project (the project bind mount) and .Xauthority (a host file
+   # mounted read-write for X11 forwarding): both already carry the host
+   # UID/GID on disk, so recursing into them would only waste time and
+   # needlessly touch every inode of the actual project tree.
+   find /home/user -mindepth 1 -maxdepth 1 ! -name project ! -name .Xauthority -exec chown -R $HOST_UID:$HOST_GID {} +
+   export HOME=/home/user
+   exec su -s /bin/sh -c "export PATH=\"/home/user/.local/bin:\$PATH\"; exec opencode --agent plan \"\$@\"" user _ "$@"' \
   _ ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
