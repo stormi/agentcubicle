@@ -3,8 +3,8 @@
 Durable design rationale and architecture decisions for `agentcubicle`
 — the "why" behind non-obvious choices, meant to outlive any single
 session. This is git-tracked and permanent, unlike
-`.agentcubicle/MEMORY.md` (private, ephemeral work memory) or
-`README.md` (user-facing usage docs). See `.agentcubicle/AGENTS.md`'s
+`.agentcubicle/MEMORY.local.md` (private, ephemeral work memory) or
+`README.md` (user-facing usage docs). See `.agentcubicle/AGENTS.local.md`'s
 "Memory" section for how these three are meant to relate.
 
 Deliberately avoids citing specific commit hashes or session dates —
@@ -72,24 +72,46 @@ region prematurely terminating a string). Decoding a fixed blob
 straight to a file sidesteps that class of bug entirely rather than
 requiring careful escaping to avoid it.
 
-## Local agent files: `AGENTS.md`, `CLAUDE.md`, `MEMORY.md`
+## Local agent files: `AGENTS.local.md`, `CLAUDE.local.md`, `MEMORY.local.md`
 
 These live under `.agentcubicle/` in the project, are seeded once and
 never overwritten, and are **additive** — they apply even when the
 project already has its own tracked `AGENTS.md`/`CLAUDE.md`, which
 continue to load normally through each tool's own discovery.
 
+The `.local.md` suffix is deliberate. The bare basenames
+(`AGENTS.md`/`CLAUDE.md`/`MEMORY.md`) are exactly the ones a project may
+track for its own purposes, so a reader — human or agent — couldn't tell
+at a glance which files are agentcubicle-managed (local, never committed)
+versus project-owned. `.local.md` marks the managed set unambiguously and
+makes it uniform with the `CLAUDE.local.md` root symlink, which already
+carried that convention. This is purely a naming distinction; the files
+still live under `.agentcubicle/`, so the collision-avoidance reasoning
+below is unchanged by it.
+
+Because the suffix arrived after projects had already been seeded under
+the bare names, the change is backward-compatible: on the next run,
+agentcubicle auto-renames any legacy `.agentcubicle/*.md` files to
+`*.local.md`, rewrites the `@`-import directives inside the migrated
+`CLAUDE` file (they resolve relative to `.agentcubicle/`, so bare-name
+imports would otherwise dangle and silently drop the imported content),
+repoints the root symlink from the old target, and prints a one-line
+notice. It's lossless, idempotent, and — matching how the files are
+already seeded, symlinked, and excluded — done without prompting. Only
+the load-bearing import directives are rewritten; stale self-referential
+*prose* inside a file a user has already customized is left alone.
+
 They're deliberately never placed at the literal `AGENTS.md`/`CLAUDE.md`
 paths, even as a `.git/info/exclude`d symlink: if the upstream remote
 ever adds a real tracked file at that exact path, git refuses to
 silently overwrite an existing untracked/excluded file during a merge
 or pull — a working symlink today would break the next `git pull`
-later. `CLAUDE.local.md` (a real symlink to `.agentcubicle/CLAUDE.md`)
+later. `CLAUDE.local.md` (a real symlink to `.agentcubicle/CLAUDE.local.md`)
 is safe by contrast because it's Claude Code's own documented
 convention for exactly this purpose, not a path something else might
 someday claim.
 
-`CLAUDE.md` `@`-imports `AGENTS.md` and `MEMORY.md` directly, rather
+`CLAUDE.local.md` `@`-imports `AGENTS.local.md` and `MEMORY.local.md` directly, rather
 than a prose instruction telling the model to go read them separately.
 This closes an architectural asymmetry: opencode's pickup of these
 files is deterministic (a config array it always reads), while a prose
@@ -99,22 +121,22 @@ instruction could in principle be skipped under context pressure.
 Every run auto-sends a short kickoff prompt as the tool's first turn
 (opencode's `--prompt`, Claude Code's positional `[prompt]` argument),
 asking the agent to announce what it read. A passive instruction inside
-`AGENTS.md`/`CLAUDE.md` alone is not sufficient for this: an interactive
+`AGENTS.local.md`/`CLAUDE.local.md` alone is not sufficient for this: an interactive
 TUI never gives the model an unprompted turn to act on it, so without
 an explicit first message, the instruction just sits there unused until
 the user happens to say something first.
 
 ### The three-tier documentation model
 
-`.agentcubicle/MEMORY.md` is temporary work memory only — current
+`.agentcubicle/MEMORY.local.md` is temporary work memory only — current
 focus, recent decisions not yet written down elsewhere, and open
 threads — not a place for anything meant to last. `README.md` is
 user-facing usage documentation. This file is durable design rationale.
 Content is expected to flow from the first into the other two over
-time (a decision gets made and noted in MEMORY.md, then later promoted
-into README.md or here once it's stable, and trimmed out of MEMORY.md
+time (a decision gets made and noted in MEMORY.local.md, then later promoted
+into README.md or here once it's stable, and trimmed out of MEMORY.local.md
 accordingly) rather than accumulating indefinitely in the ephemeral
-one. See `.agentcubicle/AGENTS.md`'s "Memory" section for the actual
+one. See `.agentcubicle/AGENTS.local.md`'s "Memory" section for the actual
 rule an agent follows.
 
 ## Claude commit trailer
@@ -259,9 +281,9 @@ makes that technically impossible, it's just not what the tool is set
 up to encourage.
 
 Since the tool itself has no awareness of this workflow by default,
-`.agentcubicle/AGENTS.md` carries an explicit instruction telling the
+`.agentcubicle/AGENTS.local.md` carries an explicit instruction telling the
 agent never to push or suggest pushing (e.g. Claude Code's own "push to
 origin" follow-up suggestion after a commit). This reaches both tools,
-not just Claude Code, since it lives in the shared `AGENTS.md` rather
+not just Claude Code, since it lives in the shared `AGENTS.local.md` rather
 than the Claude-specific file. Like any model instruction, this is a
 strong nudge, not a hard guarantee.
