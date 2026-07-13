@@ -519,13 +519,13 @@ fi
 #   plan-agent rules deny edits, but this blanket allow is appended after
 #   them in the resolved rule list, so it can win. Accepted trade-off; see
 #   README "Permissions" for detail.
-# - An `instructions` entry pointing at the local AGENTS.md/MEMORY.md pair
-#   (see the .agentcubicle/ block below) — confirmed empirically that
+# - An `instructions` entry pointing at the local AGENTS.local.md/MEMORY.local.md
+#   pair (see the .agentcubicle/ block below) — confirmed empirically that
 #   opencode merges `instructions` from OPENCODE_CONFIG_CONTENT with any
 #   file-based config's own `instructions` array rather than replacing it,
 #   so this is purely additive even when the project has its own AGENTS.md.
 OPENCODE_CONFIG_JSON=$(jq -nc --arg dir "$CONTAINER_PROJECT_DIR" \
-  '{"permission":{"*":"allow"},"instructions":[$dir + "/.agentcubicle/AGENTS.md", $dir + "/.agentcubicle/MEMORY.md"]}')
+  '{"permission":{"*":"allow"},"instructions":[$dir + "/.agentcubicle/AGENTS.local.md", $dir + "/.agentcubicle/MEMORY.local.md"]}')
 
 # Forward a safe, curated subset of the host's global git config (identity +
 # a few UX settings) into the container. Allowlist, not blocklist, so we never
@@ -564,13 +564,48 @@ rm -f "$TMP_GITCONFIG"
 # actively break the next `git pull`. `.git/info/exclude` only suppresses
 # `git status`/`git add` discovery; it does not grant git permission to
 # clobber a colliding path during merge.
+#
+# The files are suffixed `.local.md` (matching the CLAUDE.local.md root
+# symlink) so they read unambiguously as agentcubicle-managed rather than
+# colliding with a bare AGENTS.md/CLAUDE.md/MEMORY.md the project might track.
 mkdir -p "$WORKDIR/.agentcubicle"
 
+# One-time transition for projects seeded by an earlier version, which used
+# the bare names. Auto-rename any legacy files to their .local.md counterpart:
+# lossless, idempotent, and silent apart from a single notice. Runs before the
+# seed step so seeding can't create fresh files next to orphaned legacy ones.
+# Only moves when the new name is absent, so a hand-made .local.md is never
+# clobbered.
+_migrated=0
+for _pair in "AGENTS.md:AGENTS.local.md" "CLAUDE.md:CLAUDE.local.md" "MEMORY.md:MEMORY.local.md"; do
+  _old="$WORKDIR/.agentcubicle/${_pair%%:*}"
+  _new="$WORKDIR/.agentcubicle/${_pair##*:}"
+  if [[ -f "$_old" && ! -e "$_new" ]]; then
+    mv "$_old" "$_new"
+    _migrated=1
+    # The CLAUDE file's `@` imports resolve relative to .agentcubicle/, so the
+    # bare-name imports would now dangle — rewrite just those two directives
+    # (any user prose is left untouched).
+    if [[ "$_new" == */CLAUDE.local.md ]]; then
+      sed -i -e 's/^@AGENTS\.md$/@AGENTS.local.md/' \
+             -e 's/^@MEMORY\.md$/@MEMORY.local.md/' "$_new"
+    fi
+  fi
+done
+# Repoint the root symlink if it still targets the old CLAUDE.md; the creation
+# guard further down only fires when nothing is present at the path, so it
+# won't fix an existing symlink. Only our own symlink to the old target is
+# touched — never a real file the user may have placed there.
+if [[ -L "$WORKDIR/CLAUDE.local.md" && "$(readlink "$WORKDIR/CLAUDE.local.md")" == ".agentcubicle/CLAUDE.md" ]]; then
+  ln -sfn .agentcubicle/CLAUDE.local.md "$WORKDIR/CLAUDE.local.md"
+fi
+[[ "$_migrated" == 1 ]] && echo "agentcubicle: migrated .agentcubicle/ files to the .local.md naming convention"
+
 AGENTS_CONTENT=$(cat <<'AGENTS_EOF'
-# AGENTS.md (agentcubicle local file)
+# AGENTS.local.md (agentcubicle local file)
 
 > Local-only, machine-specific file maintained by `agentcubicle` at
-> `.agentcubicle/AGENTS.md`, loaded automatically by whichever coding agent
+> `.agentcubicle/AGENTS.local.md`, loaded automatically by whichever coding agent
 > is running (mechanism varies by tool; see README.md if you are a human
 > curious how) — *in addition to* any AGENTS.md the project itself already
 > has, never as a replacement. Nothing here is ever committed, tracked, or
@@ -596,17 +631,17 @@ here. A few sensible defaults to start with:
 
 When updating agent rules, select the appropriate destination:
 
-* If the instructions are specific to the agentcubicle container context: `.agentcubicle/AGENTS.md`.
+* If the instructions are specific to the agentcubicle container context: `.agentcubicle/AGENTS.local.md`.
 * If not:
   * If a git-tracked `AGENTS.md` exists at the project level, ask the user where to put the instructions.
-  * Else `.agentcubicle/AGENTS.md`.
+  * Else `.agentcubicle/AGENTS.local.md`.
 
 ## Memory
 
 Three places for information to live, each with a different purpose and
 lifetime — know which one something belongs in:
 
-- **`.agentcubicle/MEMORY.md`** is temporary work memory, not permanent
+- **`.agentcubicle/MEMORY.local.md`** is temporary work memory, not permanent
   documentation. It exists purely for continuity across sessions and
   should hold only:
   - **Current focus**: what's being worked on right now, if anything.
@@ -621,7 +656,7 @@ lifetime — know which one something belongs in:
 - **`docs/DESIGN.md`** (and any `docs/DESIGN/*.md` files it references)
   holds design rationale and architecture decisions — the durable "why"
   behind non-obvious choices, git-tracked and permanent, rather than
-  buried in commit messages or lost the next time MEMORY.md gets
+  buried in commit messages or lost the next time MEMORY.local.md gets
   cleaned up. If the project already has its own established design-doc
   convention (an `ARCHITECTURE.md`, `docs/adr/`, etc.), use that instead
   of introducing a new location — ask the user if it's unclear which to
@@ -631,26 +666,26 @@ lifetime — know which one something belongs in:
   project (a docs site, API reference, etc.), so its absence or a
   differently-used `docs/` is a real signal to check, not just proceed.
 
-Clean up MEMORY.md regularly, not just when it gets unwieldy: once
+Clean up MEMORY.local.md regularly, not just when it gets unwieldy: once
 something is captured permanently in README.md or the design docs, or is
 resolved/no longer relevant, trim or compress it out rather than letting
 it accumulate indefinitely. When unsure whether to delete or keep,
 condense to a one-line summary instead of deleting outright.
 
 Regularly — not only when explicitly asked — look back over what has
-stacked up in MEMORY.md and in recent git history, and use it to update
+stacked up in MEMORY.local.md and in recent git history, and use it to update
 README.md and the design docs with anything that deserves to live there
-permanently. Then clean up MEMORY.md accordingly.
+permanently. Then clean up MEMORY.local.md accordingly.
 AGENTS_EOF
 )
-_seed_if_absent "$WORKDIR/.agentcubicle/AGENTS.md" "$AGENTS_CONTENT"
+_seed_if_absent "$WORKDIR/.agentcubicle/AGENTS.local.md" "$AGENTS_CONTENT"
 
 MEMORY_CONTENT=$(cat <<'MEMORY_EOF'
-# MEMORY.md (agentcubicle local file)
+# MEMORY.local.md (agentcubicle local file)
 
 > Local-only, machine-specific continuity notes maintained by
-> `agentcubicle` at `.agentcubicle/MEMORY.md`, imported into
-> `.agentcubicle/CLAUDE.md` (via an `@` include) and read by opencode
+> `agentcubicle` at `.agentcubicle/MEMORY.local.md`, imported into
+> `.agentcubicle/CLAUDE.local.md` (via an `@` include) and read by opencode
 > directly via its own `instructions` config entry. Keep this updated
 > across sessions as a lightweight, tool-agnostic memory of where things
 > stand — update it as you go, not just at the end of a session. Nothing
@@ -663,53 +698,53 @@ MEMORY_CONTENT=$(cat <<'MEMORY_EOF'
 - **Open threads:** questions, TODOs, or half-finished work to pick back up.
 MEMORY_EOF
 )
-_seed_if_absent "$WORKDIR/.agentcubicle/MEMORY.md" "$MEMORY_CONTENT"
+_seed_if_absent "$WORKDIR/.agentcubicle/MEMORY.local.md" "$MEMORY_CONTENT"
 
 CLAUDE_CONTENT=$(cat <<'CLAUDE_EOF'
-# CLAUDE.md (agentcubicle local file, Claude-Code-specific)
+# CLAUDE.local.md (agentcubicle local file, Claude-Code-specific)
 
 > Local-only, machine-specific file maintained by `agentcubicle` at
-> `.agentcubicle/CLAUDE.md`, exposed at the project root as `CLAUDE.local.md`
+> `.agentcubicle/CLAUDE.local.md`, exposed at the project root as `CLAUDE.local.md`
 > (a symlink). Claude Code loads `CLAUDE.local.md` automatically every
 > session. Nothing here is ever committed, tracked, or shared with anyone
 > who clones the repo.
 >
 > Keep ONLY Claude-Code-specific instructions here — things that genuinely
 > don't apply to opencode or other tools. Everything else belongs in
-> `.agentcubicle/AGENTS.md` (general rules) or `.agentcubicle/MEMORY.md`
+> `.agentcubicle/AGENTS.local.md` (general rules) or `.agentcubicle/MEMORY.local.md`
 > (working notes). Their content is inlined below via `@` imports, so you
 > already have it without needing a separate read — do not re-read either
 > file with a tool call, that just adds a needless round trip.
 
-@AGENTS.md
-@MEMORY.md
+@AGENTS.local.md
+@MEMORY.local.md
 
 ## Claude-Code-specific instructions
 
-These supersede AGENTS.md instructions.
+These supersede AGENTS.local.md instructions.
 
 When updating agent rules, select the appropriate destination:
 
 For anything truly Claude-Code-specific:
-* If the instructions are specific to the agentcubicle container context: `.agentcubicle/CLAUDE.md`.
+* If the instructions are specific to the agentcubicle container context: `.agentcubicle/CLAUDE.local.md`.
 * If not:
   * If a git-tracked `CLAUDE.md` exists at the project level, ask the user where to put the instructions.
-  * Else `.agentcubicle/CLAUDE.md`.
+  * Else `.agentcubicle/CLAUDE.local.md`.
 
-For anything not Claude-Code-specific, follow AGENTS.md's own instructions on
-this matter (same rules, with AGENTS.md as the target instead).
+For anything not Claude-Code-specific, follow AGENTS.local.md's own instructions on
+this matter (same rules, with AGENTS.local.md as the target instead).
 
 (No project-specific Claude Code instructions yet — add any above as they
 come up.)
 CLAUDE_EOF
 )
-_seed_if_absent "$WORKDIR/.agentcubicle/CLAUDE.md" "$CLAUDE_CONTENT"
+_seed_if_absent "$WORKDIR/.agentcubicle/CLAUDE.local.md" "$CLAUDE_CONTENT"
 # CLAUDE.local.md is a relative symlink so Claude Code picks it up
 # automatically every session (matches CLAUDE.md's own documented symlink
 # convention). The -L check guards against a previously-created dangling
 # symlink making `ln -s` fail outright.
 if [[ ! -e "$WORKDIR/CLAUDE.local.md" && ! -L "$WORKDIR/CLAUDE.local.md" ]]; then
-  ln -s .agentcubicle/CLAUDE.md "$WORKDIR/CLAUDE.local.md"
+  ln -s .agentcubicle/CLAUDE.local.md "$WORKDIR/CLAUDE.local.md"
 fi
 
 # Register the persistent Claude state directory and the local files above
@@ -805,7 +840,7 @@ fi
 GIT_SETUP='if [ -n "$HOST_GITCONFIG_B64" ]; then printf %s "$HOST_GITCONFIG_B64" | base64 -d > "$HOME/.gitconfig-forwarded" && git config --global include.path "$HOME/.gitconfig-forwarded"; fi; git config --global --add safe.directory '"$CONTAINER_PROJECT_DIR"'; '
 
 # Sent as the tool's first turn so the "announce what you read" instruction
-# in AGENTS.md/CLAUDE.md actually has a chance to fire: an interactive TUI
+# in AGENTS.local.md/CLAUDE.local.md actually has a chance to fire: an interactive TUI
 # never gives the model an unprompted turn, so without this the loaded
 # instructions just sit there until the user happens to say something.
 # Explicitly asks for a quick, non-deliberative first answer, scoped to
