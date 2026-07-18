@@ -946,6 +946,13 @@ docker run -it \
      # wizard shows up every run despite this file existing at the old,
      # wrong location.
      echo "{\"hasCompletedOnboarding\": true, \"projects\": {\"/home/user/project\": {\"hasTrustDialogAccepted\": true}}}" > "$CLAUDE_STATE_DIR/.claude.json"
+     # claude-home lives inside the project mount, which the chown -R below
+     # deliberately skips (see docs/DESIGN.md). The root-phase mkdir/seeds
+     # above therefore leave it root:root, and the unprivileged user we
+     # drop to would hit EACCES. Chown it back explicitly here
+     # (unconditional, so a dir left
+     # root-owned by an older buggy run self-heals on the next run).
+     chown -R $HOST_UID:$HOST_GID "$CLAUDE_STATE_DIR"
    fi
    chown $HOST_UID:$HOST_GID /home/user
    # Skip project (the project bind mount) and .Xauthority (a host file
