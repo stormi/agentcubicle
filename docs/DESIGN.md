@@ -46,6 +46,19 @@ ever giving the container host access outside the project directory —
 a hard constraint from the project's inception, not something added
 later for convenience.
 
+This directory is the one exception to the "recursive `chown -R` skips
+the project mount" rule above. The entrypoint creates and seeds
+`claude-home` during its root phase (the `mkdir` and the
+`settings.json` / `.claude.json` seeds happen before the `su` that
+drops privileges), so unlike the user's own files — which the host
+writes and which therefore already carry the host UID/GID — it is born
+`root:root`. Because it lives *inside* the skipped project mount, the
+blanket fixup never touches it, and the unprivileged user we drop to
+would hit EACCES writing its own state. So `claude-home` gets its own
+explicit `chown -R $HOST_UID:$HOST_GID` right after it's seeded. The
+chown is unconditional, which also self-heals a directory left
+`root:root` by an older, buggy build on the next run.
+
 ## Git identity forwarding
 
 A curated **allowlist** (not a blocklist) of the host's
