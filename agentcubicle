@@ -5,11 +5,16 @@
 # Usage:
 #   agentcubicle setup [--clear] [--claude]               # Build base image; --claude adds Claude Code
 #   agentcubicle check [--img IMAGE]                     # Inspect image for required tools
+#   agentcubicle list [--name NAME]                      # List containers
+#   agentcubicle shell [--name NAME]                     # Shell into running container
 #   agentcubicle commit [--name NAME]                     # Commit running container
 #   agentcubicle cleanup                                  # Remove stopped containers
 #   agentcubicle <opencode|claude> [--mount MOUNT] [--env ENV] [--img IMAGE] [--name NAME] [--] [tool args...]
 #
 # Examples:
+#   agentcubicle list
+#   agentcubicle shell
+#   agentcubicle shell --name ac-myproject-abc123
 #   agentcubicle setup
 #   agentcubicle setup --claude
 #   agentcubicle setup --clear
@@ -119,7 +124,7 @@ _seed_if_absent() {
 # --- Phase 1: extract top-level subcommands (no tool context) ---
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    setup|check|commit|cleanup)
+    setup|check|commit|cleanup|list|shell)
       COMMAND="$1"
       shift
       ;;
@@ -181,6 +186,40 @@ if [[ "$COMMAND" == "commit" ]]; then
   done
 fi
 
+# Parse `list` flags
+if [[ "$COMMAND" == "list" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --name)
+        CMD_NAME="$2"
+        shift 2
+        ;;
+      *)
+        echo "Error: unknown argument '$1' for list."
+        echo "Usage: agentcubicle list [--name NAME]"
+        exit 1
+        ;;
+    esac
+  done
+fi
+
+# Parse `shell` flags
+if [[ "$COMMAND" == "shell" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --name)
+        CMD_NAME="$2"
+        shift 2
+        ;;
+      *)
+        echo "Error: unknown argument '$1' for shell."
+        echo "Usage: agentcubicle shell [--name NAME]"
+        exit 1
+        ;;
+    esac
+  done
+fi
+
 # --- Phase 2: run mode — requires <opencode|claude> ---
 if [[ -z "$COMMAND" ]]; then
   if [[ $# -lt 1 ]] || [[ "$1" == "--" ]]; then
@@ -189,6 +228,8 @@ if [[ -z "$COMMAND" ]]; then
     echo "Usage: agentcubicle <opencode|claude> [options...] [--] [tool args...]"
     echo "       agentcubicle setup [--clear] [--claude]"
     echo "       agentcubicle check [--img IMAGE]"
+    echo "       agentcubicle list [--name NAME]"
+    echo "       agentcubicle shell [--name NAME]"
     echo "       agentcubicle commit [--name NAME]"
     echo "       agentcubicle cleanup"
     exit 1
@@ -376,6 +417,63 @@ if [[ "$COMMAND" == "cleanup" ]]; then
   for cid in $(docker ps -a --filter 'name=^ac-' --filter 'status=exited' --format '{{.ID}}' 2>/dev/null || true); do
     docker rm "$cid"
   done
+  exit 0
+fi
+
+# -- list --
+if [[ "$COMMAND" == "list" ]]; then
+  if [[ -n "$CMD_NAME" ]]; then
+    docker ps -a --filter "name=$CMD_NAME" --format 'table {{.Status}}\t{{.Names}}\t{{.Image}}\t{{.CreatedAt}}' 2>/dev/null || true
+  else
+    docker ps -a --filter 'name=^ac-' --format 'table {{.Status}}\t{{.Names}}\t{{.Image}}\t{{.CreatedAt}}' 2>/dev/null || true
+  fi
+  exit 0
+fi
+
+# -- shell --
+if [[ "$COMMAND" == "shell" ]]; then
+  if [[ -n "$CMD_NAME" ]]; then
+    docker inspect "$CMD_NAME" >/dev/null 2>&1 || { echo "Error: container '$CMD_NAME' not found."; exit 1; }
+    RUNNING=$(docker inspect -f '{{.State.Running}}' "$CMD_NAME" 2>/dev/null || true)
+    if [[ "$RUNNING" != "true" ]]; then
+      echo "Error: container '$CMD_NAME' is not running. Use 'list' to see containers."
+      exit 1
+    fi
+    docker exec -it "$CMD_NAME" sh
+    exit 0
+  fi
+
+  CONTAINERS=$(docker ps --filter 'name=^ac-' --format '{{.Names}}' 2>/dev/null || true)
+  if [[ -z "$CONTAINERS" ]]; then
+    echo "No running containers prefixed with 'ac-' found."
+    exit 1
+  fi
+
+  echo "Running containers:"
+  IDX=1
+  NAMES=()
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    NAMES+=("$name")
+    echo "  ${IDX}) ${name}"
+    IDX=$((IDX + 1))
+  done <<< "$CONTAINERS"
+
+  if [[ ! -t 0 ]]; then
+    echo "Error: no tty available. Use --name to specify a container (not interactive)."
+    exit 1
+  fi
+
+  echo -n "Pick a container [1]: "
+  read -r REPLY_CHOICE
+  CHOICE="${REPLY_CHOICE:-1}"
+
+  if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [[ "$CHOICE" -lt 1 || "$CHOICE" -gt "${#NAMES[@]}" ]]; then
+    echo "Invalid choice."
+    exit 1
+  fi
+
+  docker exec -it "${NAMES[$((CHOICE - 1))]}" sh
   exit 0
 fi
 
