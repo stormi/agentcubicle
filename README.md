@@ -151,6 +151,34 @@ Without `--name`, the script lists running `ac-*` containers interactively and a
 
 Remove all exited containers with names prefixed `ac-`.
 
+### `list`
+
+List all `ac-*` containers (running and stopped) with status, name, image, and creation time.
+
+| Flag        | Description                                              |
+|-------------|----------------------------------------------------------|
+| `--name N`  | Filter to a specific container by name                   |
+
+```sh
+agentcubicle list
+agentcubicle list --name ac-myproject-abc123
+```
+
+### `shell`
+
+Start an interactive root shell in a running container.
+
+| Flag        | Description                                              |
+|-------------|----------------------------------------------------------|
+| `--name N`  | Exec into a specific container by name                   |
+
+Without `--name`, lists running `ac-*` containers interactively and asks you to pick one. Refuses to shell into a stopped container.
+
+```sh
+agentcubicle shell
+agentcubicle shell --name ac-myproject-abc123
+```
+
 ## Running a tool (default mode)
 
 ```sh
@@ -292,6 +320,15 @@ agentcubicle commit
 
 # Clean up stopped containers
 agentcubicle cleanup
+
+# List all containers
+agentcubicle list
+
+# Interactive shell into a running container
+agentcubicle shell
+
+# Shell into a specific container
+agentcubicle shell --name ac-myproject-abc123
 ```
 
 ## Requirements
