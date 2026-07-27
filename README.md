@@ -386,3 +386,10 @@ agentcubicle shell --name ac-myproject-abc123
 - Docker
 - `jq`
 - Current directory as the project workspace
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md)
+first, especially before anything larger than a small fix. It covers what
+to raise in an issue up front, how AI-assisted changes are expected to work
+(a human owns and understands them), and the commit conventions I follow.
