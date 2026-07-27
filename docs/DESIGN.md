@@ -46,6 +46,24 @@ ever giving the container host access outside the project directory —
 a hard constraint from the project's inception, not something added
 later for convenience.
 
+The host `settings.json` is copied into `claude-home` **only on the
+first seed** — the `cp` is guarded by
+`[ ! -f "$CLAUDE_STATE_DIR/settings.json" ]`, so once the persisted
+copy exists it is authoritative and the (still read-only-mounted) host
+file is ignored for seeding on every subsequent run. Two consequences
+follow, and they are the point: settings Claude Code writes
+*in-container* — a `/model` choice, say — **persist for that container**
+across recreations; and editing the host `settings.json` afterward does
+**not** propagate back into an already-seeded container, so each
+container captures the host state as of its own first run and then
+diverges (two containers can legitimately end up on different models).
+This is deliberately the opposite of `opencode`, whose config is
+re-copied from the host on every run (see "opencode provider and model
+configuration") and therefore always reflects the current host while
+persisting nothing written in-container. Divergence is the price of
+persistence, and persistence is exactly what `claude` needs — it
+accumulates real per-project state — whereas `opencode` does not.
+
 This directory is the one exception to the "recursive `chown -R` skips
 the project mount" rule above. The entrypoint creates and seeds
 `claude-home` during its root phase (the `mkdir` and the
