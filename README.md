@@ -6,7 +6,7 @@ Run opencode or claude code in an isolated Docker container. Project files are m
 
 Well, I didn't know how to choose between all the "isolate your agents" projects, and had a few needs I wanted to be taken care of in priority.
 
-One of my goals was the ability to run an agent from any directory, without extra configuration, and to keep local-to-me-needs context for the next sessions.
+One of my goals was the ability to run an agent from any directory, without extra configuration, and to keep local-to-me context for the next sessions.
 
 I'm sharing the result in case it's useful to anyone, but I don't make any promises about its usefulness. Nor about its security: container sandboxing can be escaped, it's a protection against the most obvious mistakes, but not real security to protect your computer and data.
 
