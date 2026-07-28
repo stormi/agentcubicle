@@ -336,7 +336,7 @@ if [[ "$COMMAND" == "setup" ]]; then
 
   if $NEEDS_BASE; then
     echo "Building $COMMIT_TARGET with dev tools ..."
-    docker build --progress=plain ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} --build-arg PACKAGES="${PKG_NAMES[*]}" --build-arg INSTALL_CLAUDE="$BUILD_CLAUDE" -t "$COMMIT_TARGET" - < <(
+    docker build ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} --build-arg PACKAGES="${PKG_NAMES[*]}" --build-arg INSTALL_CLAUDE="$BUILD_CLAUDE" -t "$COMMIT_TARGET" - < <(
       cat <<'EOF'
 FROM ghcr.io/anomalyco/opencode
 ARG PACKAGES
@@ -356,7 +356,7 @@ EOF
   # If image existed but lacks claude, add it on top
   if $NEEDS_CLAUDE; then
     echo "Adding claude to $COMMIT_TARGET ..."
-    docker build --progress=plain ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} -t "$COMMIT_TARGET" - < <(
+    docker build ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} -t "$COMMIT_TARGET" - < <(
        cat <<EOF
 FROM $COMMIT_TARGET
 RUN apk add --no-cache shadow
