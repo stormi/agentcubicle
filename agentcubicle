@@ -918,8 +918,17 @@ fi
 
 # Auto-detect clipboard/display backend and mount appropriate socket
 if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${XDG_RUNTIME_DIR:-}" && -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]]; then
-  EXTRA_MOUNTS+=("-v" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY")
-  EXTRA_ENVS+=("-e" "WAYLAND_DISPLAY=$WAYLAND_DISPLAY" "-e" "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR")
+  if [[ "$ENGINE" == podman ]]; then
+    # Rootless podman runs as a user whose UID need not match the host, so the
+    # host /run/user/<uid> path is not reusable inside (Wayland rejects an
+    # XDG_RUNTIME_DIR it thinks another user owns). Stage the socket under a
+    # container-local runtime dir and point XDG_RUNTIME_DIR at that.
+    EXTRA_MOUNTS+=("-v" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:/tmp/xdg-runtime/$WAYLAND_DISPLAY")
+    EXTRA_ENVS+=("-e" "WAYLAND_DISPLAY=$WAYLAND_DISPLAY" "-e" "XDG_RUNTIME_DIR=/tmp/xdg-runtime")
+  else
+    EXTRA_MOUNTS+=("-v" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY")
+    EXTRA_ENVS+=("-e" "WAYLAND_DISPLAY=$WAYLAND_DISPLAY" "-e" "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR")
+  fi
 elif [[ -n "${DISPLAY:-}" ]]; then
   EXTRA_MOUNTS+=("-v" "/tmp/.X11-unix:/tmp/.X11-unix")
   if [[ -n "${XAUTHORITY:-}" && -f "$XAUTHORITY" ]]; then
