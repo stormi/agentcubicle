@@ -43,6 +43,23 @@ COMMAND=""
 TOOL=""
 CMD_NAME=""
 
+# Container engine: honor AGENTCUBICLE_ENGINE if set, otherwise auto-detect,
+# preferring podman when both are installed.
+ENGINE="${AGENTCUBICLE_ENGINE:-}"
+if [[ -n "$ENGINE" ]]; then
+  if ! command -v "$ENGINE" >/dev/null 2>&1; then
+    echo "Error: AGENTCUBICLE_ENGINE is set to '$ENGINE' but that command was not found." >&2
+    exit 1
+  fi
+elif command -v podman >/dev/null 2>&1; then
+  ENGINE=podman
+elif command -v docker >/dev/null 2>&1; then
+  ENGINE=docker
+else
+  echo "Error: no container engine found. Install podman or docker, or set AGENTCUBICLE_ENGINE." >&2
+  exit 1
+fi
+
 # Packages and the binary to check for them. Format: "package:binary"
 # If no colon, the binary has the same name as the package.
 REQUIRED_PACKAGES=(
@@ -293,7 +310,7 @@ if [[ "$COMMAND" == "setup" ]]; then
 
   # Remove existing image first if --clear is set
   if $CLEAR; then
-    docker image rm -f "$COMMIT_TARGET" >/dev/null 2>/dev/null || true
+    $ENGINE image rm -f "$COMMIT_TARGET" >/dev/null 2>/dev/null || true
   fi
 
   NO_CACHE_ARGS=()
@@ -305,8 +322,8 @@ if [[ "$COMMAND" == "setup" ]]; then
   NEEDS_CLAUDE=false
   HAS_CLAUDE=false
 
-  if docker image inspect "$COMMIT_TARGET" >/dev/null 2>&1; then
-    if docker run --entrypoint sh --rm "$COMMIT_TARGET" -c "test -x /home/user/.local/bin/claude" 2>/dev/null; then
+  if $ENGINE image inspect "$COMMIT_TARGET" >/dev/null 2>&1; then
+    if $ENGINE run --entrypoint sh --rm "$COMMIT_TARGET" -c "test -x /home/user/.local/bin/claude" 2>/dev/null; then
       HAS_CLAUDE=true
     fi
 
@@ -336,7 +353,7 @@ if [[ "$COMMAND" == "setup" ]]; then
 
   if $NEEDS_BASE; then
     echo "Building $COMMIT_TARGET with dev tools ..."
-    docker build ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} --build-arg PACKAGES="${PKG_NAMES[*]}" --build-arg INSTALL_CLAUDE="$BUILD_CLAUDE" -t "$COMMIT_TARGET" - < <(
+    $ENGINE build ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} --build-arg PACKAGES="${PKG_NAMES[*]}" --build-arg INSTALL_CLAUDE="$BUILD_CLAUDE" -t "$COMMIT_TARGET" - < <(
       cat <<'EOF'
 FROM ghcr.io/anomalyco/opencode
 ARG PACKAGES
@@ -356,7 +373,7 @@ EOF
   # If image existed but lacks claude, add it on top
   if $NEEDS_CLAUDE; then
     echo "Adding claude to $COMMIT_TARGET ..."
-    docker build ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} -t "$COMMIT_TARGET" - < <(
+    $ENGINE build ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} -t "$COMMIT_TARGET" - < <(
        cat <<EOF
 FROM $COMMIT_TARGET
 RUN apk add --no-cache shadow
@@ -389,7 +406,7 @@ if [[ "$COMMAND" == "check" ]]; then
   for entry in "${REQUIRED_PACKAGES[@]}"; do
     PKG="${entry%%:*}"
     BIN="$(_pkg_to_bin "$entry")"
-    if docker run --entrypoint sh --rm "$IMAGE" -c "command -v $BIN >/dev/null" 2>/dev/null; then
+    if $ENGINE run --entrypoint sh --rm "$IMAGE" -c "command -v $BIN >/dev/null" 2>/dev/null; then
       _ok "$PKG"
     else
       _missing "$PKG"
@@ -398,7 +415,7 @@ if [[ "$COMMAND" == "check" ]]; then
   done
 
   # Also check for claude (installed to /home/user/.local/bin/claude)
-  if docker run --entrypoint sh --rm "$IMAGE" -c "test -x /home/user/.local/bin/claude" 2>/dev/null; then
+  if $ENGINE run --entrypoint sh --rm "$IMAGE" -c "test -x /home/user/.local/bin/claude" 2>/dev/null; then
     _ok "claude"
   else
     _missing "claude"
@@ -414,8 +431,8 @@ fi
 
 # -- cleanup --
 if [[ "$COMMAND" == "cleanup" ]]; then
-  for cid in $(docker ps -a --filter 'name=^ac-' --filter 'status=exited' --format '{{.ID}}' 2>/dev/null || true); do
-    docker rm "$cid"
+  for cid in $($ENGINE ps -a --filter 'name=^ac-' --filter 'status=exited' --format '{{.ID}}' 2>/dev/null || true); do
+    $ENGINE rm "$cid"
   done
   exit 0
 fi
@@ -423,9 +440,9 @@ fi
 # -- list --
 if [[ "$COMMAND" == "list" ]]; then
   if [[ -n "$CMD_NAME" ]]; then
-    docker ps -a --filter "name=$CMD_NAME" --format 'table {{.Status}}\t{{.Names}}\t{{.Image}}\t{{.CreatedAt}}' 2>/dev/null || true
+    $ENGINE ps -a --filter "name=$CMD_NAME" --format 'table {{.Status}}\t{{.Names}}\t{{.Image}}\t{{.CreatedAt}}' 2>/dev/null || true
   else
-    docker ps -a --filter 'name=^ac-' --format 'table {{.Status}}\t{{.Names}}\t{{.Image}}\t{{.CreatedAt}}' 2>/dev/null || true
+    $ENGINE ps -a --filter 'name=^ac-' --format 'table {{.Status}}\t{{.Names}}\t{{.Image}}\t{{.CreatedAt}}' 2>/dev/null || true
   fi
   exit 0
 fi
@@ -433,17 +450,17 @@ fi
 # -- shell --
 if [[ "$COMMAND" == "shell" ]]; then
   if [[ -n "$CMD_NAME" ]]; then
-    docker inspect "$CMD_NAME" >/dev/null 2>&1 || { echo "Error: container '$CMD_NAME' not found."; exit 1; }
-    RUNNING=$(docker inspect -f '{{.State.Running}}' "$CMD_NAME" 2>/dev/null || true)
+    $ENGINE inspect "$CMD_NAME" >/dev/null 2>&1 || { echo "Error: container '$CMD_NAME' not found."; exit 1; }
+    RUNNING=$($ENGINE inspect -f '{{.State.Running}}' "$CMD_NAME" 2>/dev/null || true)
     if [[ "$RUNNING" != "true" ]]; then
       echo "Error: container '$CMD_NAME' is not running. Use 'list' to see containers."
       exit 1
     fi
-    docker exec -it "$CMD_NAME" sh
+    $ENGINE exec -it "$CMD_NAME" sh
     exit 0
   fi
 
-  CONTAINERS=$(docker ps --filter 'name=^ac-' --format '{{.Names}}' 2>/dev/null || true)
+  CONTAINERS=$($ENGINE ps --filter 'name=^ac-' --format '{{.Names}}' 2>/dev/null || true)
   if [[ -z "$CONTAINERS" ]]; then
     echo "No running containers prefixed with 'ac-' found."
     exit 1
@@ -473,19 +490,19 @@ if [[ "$COMMAND" == "shell" ]]; then
     exit 1
   fi
 
-  docker exec -it "${NAMES[$((CHOICE - 1))]}" sh
+  $ENGINE exec -it "${NAMES[$((CHOICE - 1))]}" sh
   exit 0
 fi
 
 # -- commit --
 if [[ "$COMMAND" == "commit" ]]; then
   if [[ -n "$CMD_NAME" ]]; then
-    docker commit "$CMD_NAME" "$COMMIT_TARGET"
+    $ENGINE commit "$CMD_NAME" "$COMMIT_TARGET"
     exit 0
   fi
 
   # List running ac-* containers
-  CONTAINERS=$(docker ps --filter 'name=^ac-' --format '{{.Names}}' 2>/dev/null || true)
+  CONTAINERS=$($ENGINE ps --filter 'name=^ac-' --format '{{.Names}}' 2>/dev/null || true)
   if [[ -z "$CONTAINERS" ]]; then
     echo "No running containers prefixed with 'ac-' found."
     exit 1
@@ -515,12 +532,12 @@ if [[ "$COMMAND" == "commit" ]]; then
     exit 1
   fi
 
-  docker commit "${NAMES[$((CHOICE - 1))]}" "$COMMIT_TARGET"
+  $ENGINE commit "${NAMES[$((CHOICE - 1))]}" "$COMMIT_TARGET"
   exit 0
 fi
 
 # --- Normal mode: start a container ---
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+if ! $ENGINE image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Error: $IMAGE image not found."
   if [[ "$IMAGE" == "$COMMIT_TARGET" ]]; then
     echo "Run 'agentcubicle setup' first."
@@ -532,7 +549,7 @@ CONTAINER_NAME="${CMD_NAME:-$(_generate_name)}"
 
 # Remove only if a name was explicitly provided (re-use same name)
 if [[ -n "$CMD_NAME" ]]; then
-  docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+  $ENGINE rm -f "$CONTAINER_NAME" 2>/dev/null || true
 fi
 
 CONFIG_HOME="$(_config_home)"
@@ -995,7 +1012,7 @@ fi
 echo "Starting container: ${CONTAINER_NAME}"
 
 # Container starts as root → remaps `user` UID/GID to host → su's to user.
-docker run -it \
+$ENGINE run -it \
   --name "$CONTAINER_NAME" \
   --entrypoint sh \
   -w "$CONTAINER_PROJECT_DIR" \
