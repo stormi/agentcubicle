@@ -60,6 +60,13 @@ else
   exit 1
 fi
 
+# podman resolves unqualified image names against registries; pin the locally
+# built image to an unambiguous localhost/ reference so build, FROM, run, and
+# inspect all use the local image instead of attempting a registry pull.
+if [[ "$ENGINE" == podman && "$COMMIT_TARGET" != */* ]]; then
+  COMMIT_TARGET="localhost/$COMMIT_TARGET"
+fi
+
 # Packages and the binary to check for them. Format: "package:binary"
 # If no colon, the binary has the same name as the package.
 REQUIRED_PACKAGES=(
@@ -397,6 +404,10 @@ fi
 
 # -- check: inspect image for required tools --
 if [[ "$COMMAND" == "check" ]]; then
+  # A --img override may be unqualified; pin it to localhost/ under podman.
+  if [[ "$ENGINE" == podman && "$IMAGE" != */* ]]; then
+    IMAGE="localhost/$IMAGE"
+  fi
   _ok() { echo "  ✓ $1"; }
   _missing() { echo "  ✗ $1 (missing)"; }
 
@@ -537,6 +548,11 @@ if [[ "$COMMAND" == "commit" ]]; then
 fi
 
 # --- Normal mode: start a container ---
+# A --img override may be unqualified; pin it to localhost/ under podman too so
+# run and inspect use the local image instead of a registry short-name lookup.
+if [[ "$ENGINE" == podman && "$IMAGE" != */* ]]; then
+  IMAGE="localhost/$IMAGE"
+fi
 if ! $ENGINE image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Error: $IMAGE image not found."
   if [[ "$IMAGE" == "$COMMIT_TARGET" ]]; then
@@ -598,14 +614,24 @@ fi
 # an empty directory there instead, which would corrupt a future
 # `claude setup-token` save.
 CONFIG_HOME_MOUNT_ARGS=()
-if [[ "$TOOL" == "claude" ]]; then
+if [[ "$ENGINE" == podman ]]; then
+  # podman runs as the unprivileged user, which cannot read /root, so config is
+  # staged under a user-readable path for the entrypoint to copy into place.
+  if [[ "$TOOL" == "claude" ]]; then
+    if [[ -f "$CONFIG_HOME/settings.json" ]]; then
+      CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME/settings.json:/home/user/.config-host/claude/settings.json:ro")
+    fi
+  elif [[ -z "$OPENCODE_REDACTED_B64" && -d "$CONFIG_HOME" ]]; then
+    CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME:/home/user/.config-host/opencode:ro")
+  fi
+elif [[ "$TOOL" == "claude" ]]; then
   if [[ -f "$CONFIG_HOME/settings.json" ]]; then
     CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME/settings.json:/root/.claude/settings.json:ro")
   fi
 elif [[ -z "$OPENCODE_REDACTED_B64" ]]; then
   # opencode without redaction: mount the host config dir read-only as the
   # copy source. When redaction applies, the config is injected via
-  # OPENCODE_REDACTED_B64 instead, so the raw file — literal key and all —
+  # OPENCODE_REDACTED_B64 instead, so the raw file (literal key and all)
   # never enters the container's mount namespace either.
   CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME:/root${DOCKER_CONFIG_ROOT}:ro")
 fi
@@ -997,6 +1023,13 @@ EOF
   )
   INNER_CMD="$GIT_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; echo '$CLAUDE_BOOTSTRAP_INTRO_MSG'; if claude setup-token; then echo '$CLAUDE_BOOTSTRAP_SUCCESS_MSG'; else echo 'Token setup did not finish. Run agentcubicle claude again to retry.'; fi; exec sh"
 fi
+
+# Test hook: when AGENTCUBICLE_TEST_CMD is set, replace the interactive tool
+# launch with that command so CI can drive the run path headlessly. Not a
+# supported user-facing option.
+if [[ -n "${AGENTCUBICLE_TEST_CMD:-}" ]]; then
+  INNER_CMD="$AGENTCUBICLE_TEST_CMD"
+fi
 INNER_B64=$(printf '%s' "$INNER_CMD" | base64 -w0)
 
 if [[ "$TOOL" == "claude" ]] && ! $CLAUDE_HAS_CREDENTIALS; then
@@ -1011,8 +1044,63 @@ fi
 
 echo "Starting container: ${CONTAINER_NAME}"
 
+# Whether to allocate a TTY. Dropped in headless test mode (CI has no
+# controlling terminal).
+RUN_TTY_ARGS=(-it)
+if [[ -n "${AGENTCUBICLE_TEST_CMD:-}" ]]; then
+  RUN_TTY_ARGS=()
+fi
+
+if [[ "$ENGINE" == podman ]]; then
+  # Rootless podman: --userns=keep-id maps the host user onto the image's baked
+  # UID 1000, so we run as that user directly (no root remap phase) and files
+  # written into bind mounts land owned by the host user. Config is staged
+  # read-only under /home/user (see CONFIG_HOME_MOUNT_ARGS) and copied into
+  # place by the entrypoint, since the unprivileged user cannot read /root.
+  # No usermod/groupmod/chown: keep-id already gives files the right owner.
+  $ENGINE run ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} \
+    --name "$CONTAINER_NAME" \
+    --entrypoint sh \
+    --userns=keep-id:uid=1000,gid=1000 \
+    --security-opt label=disable \
+    -w "$CONTAINER_PROJECT_DIR" \
+    -v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw" \
+    ${CONFIG_HOME_MOUNT_ARGS[@]+"${CONFIG_HOME_MOUNT_ARGS[@]}"} \
+    ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
+    -e HOME=/home/user \
+    -e "INNER_B64=$INNER_B64" \
+    -e "TOOL=$TOOL" \
+    ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"} \
+    "$IMAGE" \
+    -c \
+    'mkdir -p /home/user/.config/opencode
+     if [ -n "$OPENCODE_REDACTED_B64" ]; then
+       printf %s "$OPENCODE_REDACTED_B64" | base64 -d > "/home/user/.config/opencode/$OPENCODE_REDACTED_BASENAME"
+     elif [ -f /home/user/.config-host/opencode/opencode.json ]; then
+       cp /home/user/.config-host/opencode/opencode.json /home/user/.config/opencode/
+     elif [ -f /home/user/.config-host/opencode/opencode.jsonc ]; then
+       cp /home/user/.config-host/opencode/opencode.jsonc /home/user/.config/opencode/
+     fi
+     if [ "$TOOL" = "claude" ]; then
+       CLAUDE_STATE_DIR=/home/user/project/.agentcubicle/claude-home
+       mkdir -p "$CLAUDE_STATE_DIR"
+       if [ ! -f "$CLAUDE_STATE_DIR/settings.json" ] && [ -f /home/user/.config-host/claude/settings.json ]; then
+         cp /home/user/.config-host/claude/settings.json "$CLAUDE_STATE_DIR/"
+       fi
+       if [ -f "$CLAUDE_STATE_DIR/settings.json" ]; then
+         jq ". + {skipDangerousModePermissionPrompt: true}" "$CLAUDE_STATE_DIR/settings.json" > "$CLAUDE_STATE_DIR/settings.json.tmp" \
+           && mv "$CLAUDE_STATE_DIR/settings.json.tmp" "$CLAUDE_STATE_DIR/settings.json"
+       else
+         echo "{\"skipDangerousModePermissionPrompt\": true}" > "$CLAUDE_STATE_DIR/settings.json"
+       fi
+       echo "{\"hasCompletedOnboarding\": true, \"projects\": {\"/home/user/project\": {\"hasTrustDialogAccepted\": true}}}" > "$CLAUDE_STATE_DIR/.claude.json"
+     fi
+     CMD=$(echo "$INNER_B64" | base64 -d)
+     exec sh -c "export PATH=\"/home/user/.local/bin:\$PATH\"; $CMD" _ "$@"' \
+    _ ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+else
 # Container starts as root → remaps `user` UID/GID to host → su's to user.
-$ENGINE run -it \
+$ENGINE run ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} \
   --name "$CONTAINER_NAME" \
   --entrypoint sh \
   -w "$CONTAINER_PROJECT_DIR" \
@@ -1079,5 +1167,6 @@ $ENGINE run -it \
     CMD=$(echo "$INNER_B64" | base64 -d)
     exec su -s /bin/sh -c "export PATH=\"/home/user/.local/bin:\$PATH\"; $CMD" user _ "$@"' \
   _ ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+fi
 
 
