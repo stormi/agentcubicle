@@ -79,6 +79,42 @@ explicit `chown -R $HOST_UID:$HOST_GID` right after it's seeded. The
 chown is unconditional, which also self-heals a directory left
 `root:root` by an older, buggy build on the next run.
 
+The whole root-phase-and-chown scheme above is the **Docker** model. Under
+rootless **Podman** none of it applies (see "Container engine" below): the
+process already runs as the mapped user, so `claude-home` is born owned by
+that user and needs no chown.
+
+## Container engine (Docker and Podman)
+
+The engine is chosen once at startup: `AGENTCUBICLE_ENGINE` if set, otherwise
+auto-detected preferring `podman`, falling back to `docker`, erroring if
+neither is present. Every container call goes through a single `ENGINE`
+variable. Two engine differences drive the rest:
+
+- **UID mapping.** Docker (rootful) starts the container as root, remaps the
+  baked `user` to your host UID/GID, `chown`s, then `su`s down. Rootless
+  Podman cannot do that: its container "root" maps to a subordinate UID, not
+  your host user, so a post-remap `user` would write files owned by an
+  unusable subuid. Instead Podman runs with `--userns=keep-id:uid=1000,gid=1000`,
+  which maps your host user straight onto the image's `user` (UID 1000), and
+  the process runs as that user directly, with no root phase, `usermod`, or
+  `chown`. Bind-mounted writes then land owned by you on the host in both
+  models, by opposite mechanisms.
+- **Config staging.** The Docker path reads host config from under `/root`
+  (it is root at that point). The unprivileged Podman process cannot read
+  `/root`, so config is staged read-only under `/home/user/.config-host/...`
+  and copied into place by the entrypoint. The opencode config mount is
+  guarded on the source directory existing, because Podman errors on a
+  missing bind-mount source where Docker silently creates it (root-owned).
+
+Supporting details: the locally built image is referenced as
+`localhost/agentcubicle` under Podman so it is not mistaken for a registry
+short name; `--security-opt label=disable` avoids relabeling the project on
+SELinux hosts; and the Wayland socket is staged in a container-local runtime
+dir rather than reusing the host `/run/user/<uid>` path. Both engine paths
+(file ownership round-trip and host config forwarding) are exercised by the
+`engines` CI workflow; the clipboard path is not (runners are headless).
+
 ## Git identity forwarding
 
 An explicit **allowlist** (not a blocklist) of the host's

@@ -1,6 +1,8 @@
 #!/bin/bash
-# Run opencode or claude in an isolated Docker container, starting in a read-only
-# plan mode you manually escalate out of. Project files are mounted read-write.
+# Run opencode or claude in an isolated container (Docker or rootless Podman),
+# starting in a read-only plan mode you manually escalate out of. Project files
+# are mounted read-write. The engine is auto-detected (Podman preferred when
+# both are installed); set AGENTCUBICLE_ENGINE=docker or =podman to override.
 #
 # Usage:
 #   agentcubicle setup [--clear] [--claude]               # Build base image; --claude adds Claude Code

@@ -1,6 +1,6 @@
 # agentcubicle
 
-Run opencode or claude code in an isolated Docker container. Project files are mounted read-write; sessions start in a read-only plan mode that you manually escalate out of once you're ready to let it act.
+Run opencode or claude code in an isolated container (Docker, or rootless Podman). Project files are mounted read-write; sessions start in a read-only plan mode that you manually escalate out of once you're ready to let it act.
 
 ## Why another tool
 
@@ -17,8 +17,9 @@ I'm sharing the result in case it's useful to anyone, but I don't make any promi
 - Commit-only workflow: agents can commit inside the container (and will usually ask first when they respect the default rules), but pushing/PRs are left to you on the host. `git` identity forwarding is an allowlist that deliberately skips `credential.helper`.
 - Starts every session in a read-only plan mode you manually escalate out of (`opencode --agent plan`; Claude `--permission-mode plan`).
 - Minimal mounts: project dir (rw), plus tool config read-only (`~/.config/opencode` for opencode; only `~/.claude/settings.json` for Claude, never the OAuth/credentials files).
-- Container runs as a user matching your host UID/GID, so files you create are owned by you on the host.
-- Auto-detected clipboard/display passthrough (Wayland socket or X11 `/tmp/.X11-unix` + `XAUTHORITY`). Works well for me with opencode's "selecting text copies it" behaviour.
+- Files you create come out owned by you on the host: under Docker via a root-phase UID/GID remap, under rootless Podman via `--userns=keep-id`.
+- Runs on Docker or rootless Podman. The engine is auto-detected (Podman preferred when both are installed); set `AGENTCUBICLE_ENGINE=docker` or `=podman` to override.
+- Auto-detected clipboard/display passthrough (Wayland socket or X11 `/tmp/.X11-unix` + `XAUTHORITY`). Works well for me with opencode's "selecting text copies it" behaviour. The Podman path is newer and less exercised here than the Docker one.
 
 #### Claude-specific
 
@@ -260,11 +261,11 @@ The project name is derived from the current working directory basename, with no
 ## How it works
 
 1. **Image**: The default image is `agentcubicle`, built from `ghcr.io/anomalyco/opencode` with ~30 dev packages (via Alpine's `apk`) plus bash. Claude Code is added separately via `setup --claude`.
-2. **User & home vs. project**: The container starts as root to create a `user` account matching your host UID/GID, copies tool config files into place, then drops privileges via `su`. The container's `$HOME` (`/home/user`) is throwaway scratch space that's discarded when the container exits; it is *not* the same thing as your project. Your actual project directory is bind-mounted as a clearly separate child path, `/home/user/project`, so it's never ambiguous which files are ephemeral container state and which are your real, persisted work. Files created under `/home/user/project` are owned by you on the host, with no group tricks needed.
+2. **User & home vs. project**: Under Docker the container starts as root to create a `user` account matching your host UID/GID, copies tool config files into place, then drops privileges via `su`. Under rootless Podman there is no root phase: `--userns=keep-id` maps your host user directly onto the container's `user`, so files land owned by you without a remap (and `--security-opt label=disable` keeps SELinux hosts from relabeling your project). Either way, the container's `$HOME` (`/home/user`) is throwaway scratch space that's discarded when the container exits; it is *not* the same thing as your project. Your actual project directory is bind-mounted as a clearly separate child path, `/home/user/project`, so it's never ambiguous which files are ephemeral container state and which are your real, persisted work. Files created under `/home/user/project` are owned by you on the host.
 3. **Mounts**:
    - The current working directory is mounted read-write at `/home/user/project` (also the container's working directory).
-   - For `opencode`: `~/.config/opencode` is mounted read-only at `/root/.config/opencode` (source for config copy).
-   - For `claude`: only `~/.claude/settings.json` (not the whole directory) is mounted read-only, at `/root/.claude/settings.json`, so the oauth-token file and the raw `.credentials.json` never enter the container's mount namespace at all (skipped entirely if `settings.json` doesn't exist yet).
+   - For `opencode`: `~/.config/opencode` is mounted read-only as the source for a config copy (at `/root/.config/opencode` under Docker; under Podman, where the unprivileged user cannot read `/root`, it is staged under `/home/user/.config-host/opencode` instead). Skipped when no opencode config exists.
+   - For `claude`: only `~/.claude/settings.json` (not the whole directory) is mounted read-only, so the oauth-token file and the raw `.credentials.json` never enter the container's mount namespace at all (skipped entirely if `settings.json` doesn't exist yet).
    - Any extra mounts from `--mount` are passed through.
    - Beyond the project directory itself, the only other things ever mounted are: whatever you explicitly add via `--mount`, and (read-write, since the underlying protocols require it) the X11/Wayland display socket and `$XAUTHORITY` when clipboard/display auto-detection kicks in (see item 11 below). Nothing else on the host is ever touched.
 4. **Permissions**: containers start in a read-only **plan mode** rather than fully bypassing permissions: you review what's proposed, then manually escalate to let it actually act:
@@ -283,8 +284,9 @@ The project name is derived from the current working directory basename, with no
    - `.agentcubicle/` and `CLAUDE.local.md` are both registered in the repo's local `.git/info/exclude` (not `.gitignore`, for the same leak-prevention reason as the persisted Claude state above).
    - Both `AGENTS.local.md` and `CLAUDE.local.md` ask the tool to state, at the start of every session, which local files it read and a one-paragraph summary of what it picked up, but an interactive session never gives the model an unprompted turn to say anything until it receives input. So every run also auto-sends a short kickoff prompt (via opencode's `--prompt` / Claude Code's positional `[prompt]` argument, both of which submit an initial message without leaving interactive mode) asking it to do exactly that as its first reply. Any of your own extra args are still respected; `--prompt`/the positional prompt argument just becomes the tool's first turn.
 11. **Clipboard / Display**: Auto-detected based on environment:
-    - **Wayland**: If `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` are set, the Wayland socket is mounted and made available.
+    - **Wayland**: If `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` are set, the Wayland socket is mounted and made available. Under Podman it is staged in a container-local runtime dir (the host `/run/user/<uid>` path is not reusable when the container UID differs from the host).
     - **X11**: If `DISPLAY` is set, `/tmp/.X11-unix` is mounted and `XAUTHORITY` is forwarded if present.
+    - The Podman clipboard path has not been verified on a real desktop yet; report back if it misbehaves.
 12. **Git**: `/home/user/project` is registered as a safe directory so git operations work without warnings.
 
 ## Installed packages
@@ -383,7 +385,8 @@ agentcubicle shell --name ac-myproject-abc123
 
 ## Requirements
 
-- Docker
+- Docker, or rootless Podman. Auto-detected, Podman preferred when both are
+  installed; override with `AGENTCUBICLE_ENGINE=docker` or `=podman`.
 - `jq`
 - Current directory as the project workspace
 
