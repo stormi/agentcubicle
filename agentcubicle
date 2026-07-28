@@ -364,7 +364,7 @@ RUN addgroup -g 1000 user 2>/dev/null || true; adduser -u 1000 -G user -D -h /ho
 RUN mkdir -p /usr/local/bin
 ENV PATH="/usr/local/bin:\$PATH"
 ENV USE_BUILTIN_RIPGREP=0
-RUN su -s /bin/sh user -c 'export PATH="/home/user/.local/bin:$PATH" USE_BUILTIN_RIPGREP=0; curl -fsSL https://claude.ai/install.sh | bash'
+RUN su -s /bin/sh user -c 'export PATH="/home/user/.local/bin:\$PATH" USE_BUILTIN_RIPGREP=0; curl -fsSL https://claude.ai/install.sh | bash'
 EOF
     )
     echo "Done. Claude Code is installed."
