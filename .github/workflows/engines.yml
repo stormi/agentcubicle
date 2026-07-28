@@ -1,0 +1,74 @@
+name: engines
+
+# Exercises both container-engine paths on GitHub-hosted runners, which ship
+# podman and docker preinstalled (podman with subuid/subgid configured for the
+# runner user). The point is to verify what we cannot test locally: a file
+# written from inside the container lands owned by the host (runner) user.
+#
+#   rootless (podman): via --userns=keep-id, run as the mapped user directly.
+#   rootful  (docker): via the root-phase usermod/chown remap.
+#
+# Ubuntu runners are not SELinux-enforcing, so :z/:Z and label=disable handling
+# is not exercised here.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  engine:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [podman, docker]
+    env:
+      AGENTCUBICLE_ENGINE: ${{ matrix.engine }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Environment info
+        run: |
+          set -x
+          "$AGENTCUBICLE_ENGINE" --version
+          id
+          if [ "$AGENTCUBICLE_ENGINE" = podman ]; then cat /etc/subuid /etc/subgid; fi
+
+      - name: Build image
+        run: ./agentcubicle setup
+
+      # Seed the host opencode config BEFORE any container runs. If left to the
+      # first run, mounting the nonexistent config dir as a bind source makes
+      # docker auto-create it root-owned on the host (and trips podman), so it
+      # must exist and be runner-owned up front.
+      - name: Seed host opencode config
+        run: |
+          set -eux
+          mkdir -p "$HOME/.config/opencode"
+          printf '{"theme":"ci-marker-config"}\n' > "$HOME/.config/opencode/opencode.json"
+
+      - name: Run headless and assert ownership + config forwarding
+        run: |
+          set -euxo pipefail
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          rm -f probe.txt cfgprobe.txt
+          # AGENTCUBICLE_TEST_CMD replaces the interactive tool launch with a
+          # non-interactive command so the real run path can be driven in CI.
+          AGENTCUBICLE_TEST_CMD='id -u > /home/user/project/probe.txt; id -un >> /home/user/project/probe.txt; cat /home/user/.config/opencode/opencode.json > /home/user/project/cfgprobe.txt' \
+            ./agentcubicle opencode
+          echo "--- probe.txt (in-container id) ---"; cat probe.txt
+          echo "--- cfgprobe.txt (config seen inside container) ---"; cat cfgprobe.txt
+          # In-container UID differs by engine: podman keep-id runs as the
+          # image's baked UID 1000; docker remaps the user to the host UID.
+          if [ "$AGENTCUBICLE_ENGINE" = podman ]; then expected_uid=1000; else expected_uid="$(id -u)"; fi
+          test "$(sed -n 1p probe.txt)" = "$expected_uid"
+          # Host-side, the file must be owned by the runner user in both cases,
+          # proving the mapping round-trips container writes back to the host user.
+          owner="$(stat -c %U probe.txt)"
+          echo "host owner: $owner ; runner: $(id -un)"
+          test "$owner" = "$(id -un)"
+          # The host config must have been staged and copied into place inside
+          # the container by the entrypoint (under /root for docker, under
+          # /home/user for podman).
+          grep -q ci-marker-config cfgprobe.txt
