@@ -809,6 +809,17 @@ lifetime — know which one something belongs in:
   project (a docs site, API reference, etc.), so its absence or a
   differently-used `docs/` is a real signal to check, not just proceed.
 
+Avoid creating memory files that the running tool does not load on its own
+(opencode reads the files in its `instructions` list; Claude Code follows
+the `@` imports in `CLAUDE.local.md`). `.agentcubicle/MEMORY.local.md` is
+the designated place for continuity across sessions. If you need dedicated
+memory files beyond that, state their full path, relative to the repo root,
+in `.agentcubicle/MEMORY.local.md` so the agent can find them, and prefer
+`.agentcubicle/memories/` as their location. This does not apply to a
+memory directory a tool manages and loads itself (Claude Code keeps one at
+`.agentcubicle/claude-home/projects/<encoded-path>/memory/`, indexed by its
+own `MEMORY.md`): leave those where the tool puts them.
+
 Clean up MEMORY.local.md regularly, not just when it gets unwieldy: once
 something is captured permanently in README.md or the design docs, or is
 resolved/no longer relevant, trim or compress it out rather than letting
