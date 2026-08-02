@@ -888,6 +888,33 @@ For anything truly Claude-Code-specific:
 For anything not Claude-Code-specific, follow AGENTS.local.md's own instructions on
 this matter (same rules, with AGENTS.local.md as the target instead).
 
+## Where your own config and state live in this container
+
+`CLAUDE_CONFIG_DIR` points at `.agentcubicle/claude-home/` inside the
+project, not at the usual `~/.claude`. That directory holds `settings.json`,
+`.claude.json`, `projects/` (per-project memory, transcripts), `sessions/`,
+`plans/` and the rest of your state, and it persists across container
+rebuilds because it sits in the project mount. When the user says "my
+settings", that is the file to read or edit. Check `$CLAUDE_CONFIG_DIR`
+rather than assuming a path.
+
+If the host has a `settings.json`, it is mounted read-only (under
+`/root/.claude/` or `/home/user/.config-host/claude/`, depending on the
+container engine). That copy is only the source for a one-time seed; it is
+not the live file, and it is not writable.
+
+The seed happens once, the first time the container is created. After that
+the copy in `claude-home/` wins, so changes made on the host do not reach an
+already-seeded container, and changes made in a session stay in that
+container. To pull in fresh host settings, the user deletes
+`.agentcubicle/claude-home/settings.json` and runs again.
+
+None of this is the project's own `.claude/` directory (`CLAUDE.md`,
+`.claude/settings.json`, `.claude/agents/`, `.claude/skills/`), which is
+tracked in git and shared with everyone who clones. Editing one when the
+user meant the other is the mistake to avoid: `claude-home/` is per-machine
+state, `.claude/` is project configuration. Ask if it is ambiguous.
+
 (No project-specific Claude Code instructions yet — add any above as they
 come up.)
 CLAUDE_EOF
