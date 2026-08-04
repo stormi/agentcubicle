@@ -84,6 +84,45 @@ rootless **Podman** none of it applies (see "Container engine" below): the
 process already runs as the mapped user, so `claude-home` is born owned by
 that user and needs no chown.
 
+### Keys that always follow the host
+
+Seed-once is right for settings Claude Code writes about itself in a given
+container, and wrong for settings the user thinks of as theirs rather than
+that container's. A status line is the second kind: editing it per
+container, or deleting `claude-home/settings.json` to force a re-seed (and
+losing everything else in it) is not a reasonable way to change how a
+prompt looks.
+
+So there is a second channel next to the seed: `CLAUDE_PROPAGATE_KEYS`, an
+allowlist of top-level keys read from the host `settings.json` on every run
+and merged **last** into the persisted copy, so they win over both the seed
+and anything written in-container. The merge is a shallow `+` in the same
+`jq` invocation that sets `skipDangerousModePermissionPrompt`, so a
+propagated key replaces its previous value wholesale rather than being deep
+merged. Keys the host does not define are not in the merge object at all,
+which is deliberately not the same as mirroring the host: removing a key on
+the host leaves the container value alone rather than deleting it. Adding
+the next key is one array entry, plus a `case` arm if it needs validating.
+
+Extraction and validation happen on the **host** side, not in the
+entrypoint, for two reasons: the entrypoints live inside a single-quoted
+`sh -c '...'` string where a `jq` program of any complexity is painful to
+quote, and a warning about the host's own config belongs where the user can
+act on it. The accepted object is passed in base64 (`CLAUDE_PROPAGATE_B64`),
+the same trick the redacted opencode config uses, so its JSON never has to
+survive that quoting region.
+
+`statusLine` is validated because only an inline command can run in the
+container: a `command` whose first word is a path names a host script that
+is not in the container's filesystem, and the resulting status line would
+just fail silently every render. Such a value is skipped with a warning, and
+the same key is also stripped from the *seed* copy
+(`CLAUDE_SEED_STRIP_JQ`), since otherwise a fresh container would receive
+through the seed exactly the value we just said we would not propagate. The
+first-word test is a heuristic and knows nothing about what an inline
+command calls: `python3 -c ...` passes even if the script it runs needs a
+host-only file.
+
 ## Container engine (Docker and Podman)
 
 The engine is chosen once at startup: `AGENTCUBICLE_ENGINE` if set, otherwise

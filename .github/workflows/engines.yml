@@ -72,3 +72,49 @@ jobs:
           # the container by the entrypoint (under /root for docker, under
           # /home/user for podman).
           grep -q ci-marker-config cfgprobe.txt
+
+      # The claude settings.json in claude-home is seeded once, except for the
+      # CLAUDE_PROPAGATE_KEYS allowlist, which is re-read from the host on every
+      # run. Both the seed and the later overwrite are checked here, plus that
+      # the overwrite leaves the rest of the persisted file alone.
+      - name: Assert claude statusLine propagation
+        run: |
+          set -euxo pipefail
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          mkdir -p "$HOME/.claude"
+          probe='cat /home/user/project/.agentcubicle/claude-home/settings.json > /home/user/project/settings-probe.json'
+
+          # First run: fresh seed from the host file.
+          rm -rf .agentcubicle/claude-home settings-probe.json
+          printf '{"model":"ci-marker-model","statusLine":{"type":"command","command":"echo ci-marker-one"}}\n' > "$HOME/.claude/settings.json"
+          AGENTCUBICLE_TEST_CMD="$probe" ./agentcubicle claude
+          cat settings-probe.json
+          test "$(jq -r .statusLine.command settings-probe.json)" = "echo ci-marker-one"
+          test "$(jq -r .model settings-probe.json)" = "ci-marker-model"
+
+          # Something written in-container, which the propagation must not touch.
+          jq '. + {model: "ci-marker-in-container"}' settings-probe.json > tmp.json
+          mv tmp.json .agentcubicle/claude-home/settings.json
+
+          # Second run: host statusLine changed, container already seeded.
+          rm -f settings-probe.json
+          printf '{"model":"ci-marker-model","statusLine":{"type":"command","command":"echo ci-marker-two"}}\n' > "$HOME/.claude/settings.json"
+          AGENTCUBICLE_TEST_CMD="$probe" ./agentcubicle claude
+          cat settings-probe.json
+          test "$(jq -r .statusLine.command settings-probe.json)" = "echo ci-marker-two"
+          test "$(jq -r .model settings-probe.json)" = "ci-marker-in-container"
+
+          # Third run: a host script path is not propagated, and warns.
+          rm -f settings-probe.json
+          printf '{"statusLine":{"type":"command","command":"~/.claude/statusline.sh"}}\n' > "$HOME/.claude/settings.json"
+          AGENTCUBICLE_TEST_CMD="$probe" ./agentcubicle claude 2> warn.txt || { cat warn.txt; exit 1; }
+          cat warn.txt settings-probe.json
+          grep -q "not propagating statusLine" warn.txt
+          test "$(jq -r .statusLine.command settings-probe.json)" = "echo ci-marker-two"
+
+          # Fourth run: same non-inline value, but a fresh seed must not pick it
+          # up through the seed copy either.
+          rm -rf .agentcubicle/claude-home settings-probe.json
+          AGENTCUBICLE_TEST_CMD="$probe" ./agentcubicle claude
+          cat settings-probe.json
+          test "$(jq -r .statusLine settings-probe.json)" = "null"

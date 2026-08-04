@@ -638,6 +638,46 @@ elif [[ -z "$OPENCODE_REDACTED_B64" ]]; then
   CONFIG_HOME_MOUNT_ARGS=(-v "$CONFIG_HOME:/root${DOCKER_CONFIG_ROOT}:ro")
 fi
 
+# Host settings.json keys that are re-read from the host and written into the
+# container's persisted copy on *every* run, overwriting whatever is there.
+# The rest of that file is seeded once and then owned by the container (see the
+# entrypoints below), which is what per-container state needs; these keys are
+# the opposite case, host-owned presentation settings the user expects to edit
+# in one place. Add a key here to make it always follow the host, and a `case`
+# arm below if it needs validating first.
+CLAUDE_PROPAGATE_KEYS=(statusLine)
+CLAUDE_PROPAGATE_JSON='{}'
+# Applied to the host file during the one-time seed only, so a key we refuse to
+# propagate does not sneak into a fresh container through the seed copy instead.
+CLAUDE_SEED_STRIP_JQ='.'
+if [[ "$TOOL" == "claude" && -f "$CONFIG_HOME/settings.json" ]]; then
+  for _key in "${CLAUDE_PROPAGATE_KEYS[@]}"; do
+    _value="$(jq -c --arg k "$_key" '.[$k] // empty' "$CONFIG_HOME/settings.json" 2>/dev/null)" || _value=""
+    [[ -n "$_value" ]] || continue
+    _skip_reason=""
+    case "$_key" in
+      statusLine)
+        # Only an inline command can work in the container: a command that is
+        # a path to a script on the host is not there. The first token decides.
+        _cmd="$(printf '%s' "$_value" | jq -r 'select(type == "object" and .type == "command") | .command // empty' 2>/dev/null)" || _cmd=""
+        _first="${_cmd%%[[:space:]]*}"
+        if [[ -z "$_cmd" ]]; then
+          _skip_reason="it is not a command statusLine"
+        elif [[ "$_first" == */* || "$_first" == "~"* ]]; then
+          _skip_reason="it runs $_first, which does not exist in the container. Use an inline command instead."
+        fi
+        ;;
+    esac
+    if [[ -n "$_skip_reason" ]]; then
+      echo "agentcubicle: not propagating $_key from the host settings.json: $_skip_reason" >&2
+      CLAUDE_SEED_STRIP_JQ="$CLAUDE_SEED_STRIP_JQ | del(.[\"$_key\"])"
+      continue
+    fi
+    CLAUDE_PROPAGATE_JSON="$(printf '%s' "$CLAUDE_PROPAGATE_JSON" | jq -c --arg k "$_key" --argjson v "$_value" '.[$k] = $v')"
+  done
+fi
+CLAUDE_PROPAGATE_B64="$(printf '%s' "$CLAUDE_PROPAGATE_JSON" | base64 -w0)"
+
 # Whether the host's opencode config defines any real providers, as
 # opposed to relying solely on opencode's built-in free fallback models.
 # Tries jq first (handles plain JSON correctly, including a present-but-
@@ -909,6 +949,11 @@ already-seeded container, and changes made in a session stay in that
 container. To pull in fresh host settings, the user deletes
 `.agentcubicle/claude-home/settings.json` and runs again.
 
+One exception: a short allowlist of keys (`CLAUDE_PROPAGATE_KEYS` in the
+agentcubicle script, currently just `statusLine`) is re-read from the host
+file and overwritten in `claude-home/settings.json` on every run, so those
+keys always match the host and editing them in-container does not stick.
+
 None of this is the project's own `.claude/` directory (`CLAUDE.md`,
 `.claude/settings.json`, `.claude/agents/`, `.claude/skills/`), which is
 tracked in git and shared with everyone who clones. Editing one when the
@@ -1016,6 +1061,10 @@ fi
 
 if [[ -n "$OPENCODE_REDACTED_B64" ]]; then
   EXTRA_ENVS+=("-e" "OPENCODE_REDACTED_B64=$OPENCODE_REDACTED_B64" "-e" "OPENCODE_REDACTED_BASENAME=$OPENCODE_REDACTED_BASENAME")
+fi
+
+if [[ "$TOOL" == "claude" ]]; then
+  EXTRA_ENVS+=("-e" "CLAUDE_PROPAGATE_B64=$CLAUDE_PROPAGATE_B64" "-e" "CLAUDE_SEED_STRIP_JQ=$CLAUDE_SEED_STRIP_JQ")
 fi
 
 # Build the inner command that runs as `user` (non-root).
@@ -1133,15 +1182,24 @@ if [[ "$ENGINE" == podman ]]; then
      if [ "$TOOL" = "claude" ]; then
        CLAUDE_STATE_DIR=/home/user/project/.agentcubicle/claude-home
        mkdir -p "$CLAUDE_STATE_DIR"
-       if [ ! -f "$CLAUDE_STATE_DIR/settings.json" ] && [ -f /home/user/.config-host/claude/settings.json ]; then
-         cp /home/user/.config-host/claude/settings.json "$CLAUDE_STATE_DIR/"
+       [ -n "$CLAUDE_SEED_STRIP_JQ" ] || CLAUDE_SEED_STRIP_JQ="."
+       if [ ! -f "$CLAUDE_STATE_DIR/settings.json" ]; then
+         if [ -f /home/user/.config-host/claude/settings.json ]; then
+           jq "$CLAUDE_SEED_STRIP_JQ" /home/user/.config-host/claude/settings.json > "$CLAUDE_STATE_DIR/settings.json" \
+             || cp /home/user/.config-host/claude/settings.json "$CLAUDE_STATE_DIR/settings.json"
+         else
+           echo "{}" > "$CLAUDE_STATE_DIR/settings.json"
+         fi
        fi
-       if [ -f "$CLAUDE_STATE_DIR/settings.json" ]; then
-         jq ". + {skipDangerousModePermissionPrompt: true}" "$CLAUDE_STATE_DIR/settings.json" > "$CLAUDE_STATE_DIR/settings.json.tmp" \
-           && mv "$CLAUDE_STATE_DIR/settings.json.tmp" "$CLAUDE_STATE_DIR/settings.json"
+       if [ -n "$CLAUDE_PROPAGATE_B64" ]; then
+         printf %s "$CLAUDE_PROPAGATE_B64" | base64 -d > "$CLAUDE_STATE_DIR/.settings-propagate.json"
        else
-         echo "{\"skipDangerousModePermissionPrompt\": true}" > "$CLAUDE_STATE_DIR/settings.json"
+         echo "{}" > "$CLAUDE_STATE_DIR/.settings-propagate.json"
        fi
+       jq -s ".[0] + {skipDangerousModePermissionPrompt: true} + .[1]" \
+         "$CLAUDE_STATE_DIR/settings.json" "$CLAUDE_STATE_DIR/.settings-propagate.json" > "$CLAUDE_STATE_DIR/settings.json.tmp" \
+         && mv "$CLAUDE_STATE_DIR/settings.json.tmp" "$CLAUDE_STATE_DIR/settings.json"
+       rm -f "$CLAUDE_STATE_DIR/.settings-propagate.json"
        echo "{\"hasCompletedOnboarding\": true, \"projects\": {\"/home/user/project\": {\"hasTrustDialogAccepted\": true}}}" > "$CLAUDE_STATE_DIR/.claude.json"
      fi
      CMD=$(echo "$INNER_B64" | base64 -d)
@@ -1181,15 +1239,29 @@ $ENGINE run ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} \
      # persists across container recreations (unlike the throwaway HOME
      # this used to live in), so unconditionally re-copying here would
      # clobber any settings changes accumulated in a previous session.
-     if [ ! -f "$CLAUDE_STATE_DIR/settings.json" ] && [ -f /root/.claude/settings.json ]; then
-       cp /root/.claude/settings.json "$CLAUDE_STATE_DIR/"
+     # CLAUDE_SEED_STRIP_JQ drops the keys the host side refused to
+     # propagate, so they do not arrive through the seed either.
+     [ -n "$CLAUDE_SEED_STRIP_JQ" ] || CLAUDE_SEED_STRIP_JQ="."
+     if [ ! -f "$CLAUDE_STATE_DIR/settings.json" ]; then
+       if [ -f /root/.claude/settings.json ]; then
+         jq "$CLAUDE_SEED_STRIP_JQ" /root/.claude/settings.json > "$CLAUDE_STATE_DIR/settings.json" \
+           || cp /root/.claude/settings.json "$CLAUDE_STATE_DIR/settings.json"
+       else
+         echo "{}" > "$CLAUDE_STATE_DIR/settings.json"
+       fi
      fi
-     if [ -f "$CLAUDE_STATE_DIR/settings.json" ]; then
-       jq ". + {skipDangerousModePermissionPrompt: true}" "$CLAUDE_STATE_DIR/settings.json" > "$CLAUDE_STATE_DIR/settings.json.tmp" \
-         && mv "$CLAUDE_STATE_DIR/settings.json.tmp" "$CLAUDE_STATE_DIR/settings.json"
+     # The always-propagated keys (CLAUDE_PROPAGATE_B64, built and validated
+     # on the host) are merged last, so they win over both the persisted copy
+     # and anything written in-container.
+     if [ -n "$CLAUDE_PROPAGATE_B64" ]; then
+       printf %s "$CLAUDE_PROPAGATE_B64" | base64 -d > "$CLAUDE_STATE_DIR/.settings-propagate.json"
      else
-       echo "{\"skipDangerousModePermissionPrompt\": true}" > "$CLAUDE_STATE_DIR/settings.json"
+       echo "{}" > "$CLAUDE_STATE_DIR/.settings-propagate.json"
      fi
+     jq -s ".[0] + {skipDangerousModePermissionPrompt: true} + .[1]" \
+       "$CLAUDE_STATE_DIR/settings.json" "$CLAUDE_STATE_DIR/.settings-propagate.json" > "$CLAUDE_STATE_DIR/settings.json.tmp" \
+       && mv "$CLAUDE_STATE_DIR/settings.json.tmp" "$CLAUDE_STATE_DIR/settings.json"
+     rm -f "$CLAUDE_STATE_DIR/.settings-propagate.json"
      # Claude Code resolves its onboarding/trust-dialog state file relative
      # to CLAUDE_CONFIG_DIR when that env var is set (confirmed by reading
      # the actual binary config-path resolver directly), not at
