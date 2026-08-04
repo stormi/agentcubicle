@@ -803,7 +803,11 @@ here. A few sensible defaults to start with:
   origin" as a follow-up after a commit). This container's workflow is
   commit-only: pushing happens on the host, by the user, after
   reviewing what was committed.
-- Prefer separate commits for logically distinct changes.
+- Prefer separate commits for logically distinct changes. Distinct
+  changes, not code versus prose: the documentation describing a change
+  (README, design docs, comments) goes in the same commit as the change
+  itself, so it can be reviewed and reverted as one unit. Splitting it
+  out is a habit to resist, not tidiness.
 - When a local, non-shared file needs to be kept out of a repo's history,
   use `.git/info/exclude`, never `.gitignore` (a `.gitignore` entry is
   tracked and leaks your tooling choices to anyone who clones).
