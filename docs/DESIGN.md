@@ -429,6 +429,121 @@ redact, which would be worse than not redacting at all. Detection is
 per-provider and keys off literal-vs-reference, so configs already using
 `{env:...}`/`{file:...}` are unaffected.
 
+## rtk command compaction (opencode only)
+
+opencode sessions run with [rtk](https://github.com/rtk-ai/rtk) wired in:
+before it executes a bash/shell command, the command is rewritten to its
+`rtk` equivalent, so the output rtk produces (already compacted for git,
+tests, linters, `ls`, `grep`, and a few dozen other commands) is what
+reaches the model rather than the raw output. This cuts the input tokens
+spent on command output, which is the one part of the bill agentcubicle
+can influence without touching the prompt or the model.
+
+Two deliberate choices are easy to assume incorrectly:
+
+- **The rewrite rules live in the `rtk` binary, not here.** The thing
+  agentcubicle installs is rtk's own OpenCode plugin, a thin shim whose
+  only job is to call `rtk rewrite` on each command and use the result if
+  it changed. The actual per-command rewrite table lives in rtk's Rust
+  source and is updated by the rtk project, not by agentcubicle.
+  Consequence: agentcubicle's embedded plugin should only ever change if
+  rtk's plugin file itself changes, and even then it is a verbatim copy of
+  rtk's `hooks/opencode/rtk.ts`, not a reimplementation. If rtk's plugin
+  file and the embedded copy ever drift, the embedded copy is the one to
+  update to match rtk, never the reverse.
+- **The plugin is injected per-run, never written to the host or the
+  project.** It is base64-encoded into an env var and written by the
+  entrypoint into the container's *writable* opencode config dir
+  (`/home/user/.config/opencode/plugins/rtk.ts`), the same pattern as the
+  opencode config redaction above. It is not added to the read-only host
+  config mount and not placed in the project, so neither the user's real
+  `~/.config/opencode` nor the repo is ever modified. Because the container
+  `$HOME` is throwaway, this must happen on every run rather than once.
+
+rtk's binary is baked into the image from an official release tarball, the
+same way `gh` is (no apk package exists for it), with the target triple
+chosen per architecture (`x86_64-unknown-linux-musl` /
+`aarch64-unknown-linux-gnu`; the musl build is used because the image is
+Alpine/musl). It is therefore present regardless of which tool is run, but
+only opencode activates it.
+
+It is **opencode-only on purpose.** rtk supports other agents through their
+hook/plugin mechanisms, but wiring one of those in for Claude Code would be
+a second integration surface to keep current with no proportional benefit
+here; the claude path is left untouched. If that changes, the claude
+integration should get its own section rather than being folded into this
+one.
+
+Two escape hatches, both deliberate: `--no-rtk` disables the plugin for a
+single run (the binary stays in the image; only the plugin is skipped), and
+rtk's telemetry is forced off in the container by default
+(`RTK_TELEMETRY_DISABLED=1`), overridable to `0` with `--env` for anyone
+who wants to opt rtk's anonymous usage metrics back on. Defaulting to
+disabled keeps a throwaway container from phoning home without the user
+asking for it.
+
+## ponytail coding ruleset (opencode only)
+
+opencode sessions run with [ponytail](https://github.com/DietrichGebert/ponytail)
+loaded: a lazy-senior-dev ruleset whose whole thesis is "the best code is the
+code you never wrote" (a YAGNI/reuse/stdlib ladder, root-cause bug fixing,
+deletion over addition, and `ponytail:` comments marking any deliberate
+corner). It is a prompt-level nudge, not a mechanical transformation, so it
+affects the shape of the changes an agent produces rather than the bytes of
+any command output — the opposite end of the token budget from rtk (which
+shrinks what *enters* the model, ponytail shapes what the model *writes*).
+
+The load-bearing fact that makes this integration cheap: **ponytail ships no
+binary and no plugin, only instruction text.** rtk's integration has to bake a
+binary into the image, base64 a plugin into an env var, and write that plugin
+into the container's opencode config dir. ponytail needs none of that: the
+only thing agentcubicle does is make sure opencode actually reads it. So the
+two rtk-specific mechanics do not apply and there is no image change, no
+env var, and no entrypoint change for ponytail.
+
+Two deliberate choices are worth stating, because the obvious alternatives are
+easy to assume:
+
+- **The ruleset is written into the project's `.agentcubicle/` dir, not the
+  container's opencode config dir.** rtk's plugin lives in the throwaway
+  `$HOME` and must be re-written every run (base64 env var → entrypoint →
+  file) because that location dies with the container. ponytail's file instead
+  sits at `.agentcubicle/ponytail.md`, inside the read-write project mount,
+  which is *already* mounted into the container — so it needs no env var, no
+  entrypoint write, and no image change of its own; it simply shows up in the
+  container view as part of the project. It is git-excluded for free (the
+  existing `/.agentcubicle/` exclude entry covers it), so it never leaks to
+  anyone who clones. The trade-off is that, because it is seeded once and then
+  left alone (see "Local agent files" above), a user who edits
+  `.agentcubicle/ponytail.md` in one run keeps that edit on subsequent runs —
+  the same "edits persist, never clobbered" contract as `AGENTS.local.md`.
+  agentcubicle's embedded copy is the source of truth only for the *first*
+  seed; if ponytail's upstream `AGENTS.md` and the embedded copy drift, the
+  embedded copy is the one to update to match upstream, never the reverse.
+- **It reaches opencode through the existing `instructions` channel, not a
+  new mechanism.** opencode already reads `.agentcubicle/AGENTS.local.md` and
+  `MEMORY.local.md` via the `instructions` array in the container-only
+  `OPENCODE_CONFIG_CONTENT` override (see the "Local agent files" section
+  above). ponytail's file is appended to that same list, conditionally, when
+  enabled. This is purely additive: opencode merges `instructions` from the
+  override with a file-based config's own array, so it composes with a project
+  that also has its own `AGENTS.md`.
+
+It is **opencode-only on purpose**, for the same reason as rtk: ponytail is
+tool-agnostic instruction text (its own adapters are just "put this in your
+rules file"), so there is no *technical* blocker to also loading it for Claude
+Code — but the claude rules live in the static, user-owned
+`CLAUDE.local.md` `@`-imports (see "Local agent files"), and wiring a per-run
+`--no-ponytail` toggle through a file the user owns is a second integration
+surface to keep current for no proportional benefit. The claude path is left
+untouched; if that ever changes, it gets its own section.
+
+Two escape hatches, both deliberate: `--no-ponytail` skips both the file write
+and the `instructions` entry for a single run (nothing is deleted from disk;
+a previously seeded file is simply not loaded), and the file being seeded once
+rather than per-run means a user can hand-tune ponytail for their project and
+not have agentcubicle revert it.
+
 ## Scope: opencode session state is not persisted
 
 Claude Code's per-project state is persisted via `CLAUDE_CONFIG_DIR`

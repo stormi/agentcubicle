@@ -73,6 +73,54 @@ jobs:
           # /home/user for podman).
           grep -q ci-marker-config cfgprobe.txt
 
+      # rtk is baked into the base image and its OpenCode plugin is seeded into
+      # the container's opencode config on an opencode run, unless --no-rtk.
+      # Driven headlessly the same way as the config-forwarding assertion above.
+      - name: Assert rtk binary + opencode plugin wiring
+        run: |
+          set -euxo pipefail
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          rm -f rtkprobe.txt
+          # Default opencode run: rtk present, plugin written by the entrypoint.
+          AGENTCUBICLE_TEST_CMD='command -v rtk > /home/user/project/rtkprobe.txt; rtk --version >> /home/user/project/rtkprobe.txt 2>&1; ls -l /home/user/.config/opencode/plugins/rtk.ts >> /home/user/project/rtkprobe.txt 2>&1' \
+            ./agentcubicle opencode
+          echo "--- rtkprobe.txt (default run) ---"; cat rtkprobe.txt
+          # rtk --version prints e.g. "rtk 0.50.0".
+          grep -Eq '^rtk [0-9]+\.' rtkprobe.txt
+          grep -q "plugins/rtk.ts" rtkprobe.txt
+          # --no-rtk: rtk still present, but the plugin is not seeded.
+          rm -f rtkprobe.txt
+          AGENTCUBICLE_TEST_CMD='command -v rtk > /home/user/project/rtkprobe.txt; ls /home/user/.config/opencode/plugins/rtk.ts >> /home/user/project/rtkprobe.txt 2>&1 || echo "plugin absent" >> /home/user/project/rtkprobe.txt' \
+            ./agentcubicle opencode --no-rtk
+          echo "--- rtkprobe.txt (--no-rtk run) ---"; cat rtkprobe.txt
+          grep -q "plugin absent" rtkprobe.txt
+
+      # ponytail is instruction-only (no binary, no plugin), so nothing is baked
+      # into the image; agentcubicle seeds its ruleset into the project's
+      # .agentcubicle/ dir on an opencode run, unless --no-ponytail. Driven
+      # headlessly like the rtk assertion. The file lives in the persistent
+      # project mount, so the --no-ponytail leg must start from a clean
+      # .agentcubicle/ to prove the flag suppresses the write, not a re-read.
+      - name: Assert ponytail ruleset wiring
+        run: |
+          set -euxo pipefail
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          rm -f ponytailprobe.txt
+          # Default opencode run: ponytail ruleset seeded into the project mount.
+          AGENTCUBICLE_TEST_CMD='ls -l /home/user/project/.agentcubicle/ponytail.md > /home/user/project/ponytailprobe.txt 2>&1 || echo "ponytail absent" >> /home/user/project/ponytailprobe.txt' \
+            ./agentcubicle opencode
+          echo "--- ponytailprobe.txt (default run) ---"; cat ponytailprobe.txt
+          grep -q "ponytail.md" ponytailprobe.txt
+          # The seeded content is a verbatim copy of ponytail's ruleset.
+          grep -q "lazy senior dev" .agentcubicle/ponytail.md
+          # --no-ponytail: ruleset not seeded. .agentcubicle/ persists across runs
+          # in this job (it is in the project mount), so clear it first.
+          rm -f .agentcubicle/ponytail.md ponytailprobe.txt
+          AGENTCUBICLE_TEST_CMD='ls -l /home/user/project/.agentcubicle/ponytail.md > /home/user/project/ponytailprobe.txt 2>&1 || echo "ponytail absent" >> /home/user/project/ponytailprobe.txt' \
+            ./agentcubicle opencode --no-ponytail
+          echo "--- ponytailprobe.txt (--no-ponytail run) ---"; cat ponytailprobe.txt
+          grep -q "ponytail absent" ponytailprobe.txt
+
       # Containers are removed when the tool exits; --keep-container opts out.
       - name: Assert container removal on exit
         run: |
