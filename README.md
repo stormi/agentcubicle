@@ -26,6 +26,10 @@ I'm sharing the result in case it's useful to anyone, but I don't make any promi
 
 - Persistent per-project state: `CLAUDE_CONFIG_DIR` points inside the project mount (`.agentcubicle/claude-home`) so memory/transcripts survive across runs.
 
+#### opencode-specific
+
+- Compact command output via [rtk](https://github.com/rtk-ai/rtk): opencode runs with rtk's auto-rewrite plugin, so the output of common dev commands (git, tests, linters, ...) is compacted before it reaches the model. Skip it per-run with `--no-rtk`. Claude Code is not wired to rtk here.
+
 #### Shell tools
 
 - The image bundles ~30 dev packages: compilers, debuggers, CLI tools useful to work with text files and code, network tools, language runtimes...
@@ -286,6 +290,7 @@ If no subcommand is given, a new container is started based on `agentcubicle` wi
 | `--mount P` | Extra mount, e.g. `--mount /etc/ssh:/etc/ssh:ro`. Repeatable.  |
 | `--env E`   | Extra env var, e.g. `--env ANTHROPIC_API_KEY="sk-ant-..."`. Repeatable. |
 | `--keep-container` | Keep the container after the tool exits. Without it, the container is removed on exit. |
+| `--no-rtk` | Skip the rtk command-rewriting plugin for this run (opencode only). rtk is on by default for opencode. |
 | `--`        | Pass remaining arguments directly to the tool                  |
 
 ### Container lifetime
@@ -345,6 +350,7 @@ The project name is derived from the current working directory basename, with no
     - **X11**: If `DISPLAY` is set, `/tmp/.X11-unix` is mounted and `XAUTHORITY` is forwarded if present.
     - The Podman clipboard path has not been verified on a real desktop yet; report back if it misbehaves.
 12. **Git**: `/home/user/project` is registered as a safe directory so git operations work without warnings.
+13. **rtk (opencode only)**: opencode sessions run with [rtk](https://github.com/rtk-ai/rtk) wired in to compact the output of common dev commands (git, tests, linters, `ls`, `grep`, ...) before it reaches the model — up to ~90% less bash output. The `rtk` binary is baked into the image (release tarball, like `gh`), and rtk's own OpenCode plugin is written into the container's writable opencode config dir on every run, so it is active without touching your real `~/.config/opencode`. The plugin is a thin shim that calls `rtk rewrite` on each bash/shell command, so the rewrite rules live in the `rtk` binary, not in agentcubicle. Claude Code has no rtk integration wired up here, so this only affects opencode. Pass `--no-rtk` to a run to skip it for that session. rtk's telemetry is disabled by default in the container (set `RTK_TELEMETRY_DISABLED=0` with `--env` to opt back in).
 
 ## Installed packages
 
@@ -361,9 +367,9 @@ The following packages are installed in the `agentcubicle` image:
 | **Languages**| `lua5.4`, `luajit`, `nodejs`, `python3`, `py3-pip`, `uv`                                                                                                       |
 | **System**   | `htop`, `tmux`, `bash`                                                                                                                                         |
 | **Clipboard**| `wl-clipboard`, `xclip`                                                                                                                                        |
-| **AI tools** | `opencode` (from base image), `claude` (optional, installed via `setup --claude`)                                                                              |
+| **AI tools** | `opencode` (from base image), `claude` (optional, installed via `setup --claude`), `rtk` (from a release tarball)                                               |
 
-Everything above comes from Alpine's `apk`, except `gh` (no apk package exists for it, so it comes from an official release tarball) and `opencode`/`claude` (base image and the Claude installer, respectively).
+Everything above comes from Alpine's `apk`, except `gh` and `rtk` (no apk package exists for either, so both come from official release tarballs) and `opencode`/`claude` (base image and the Claude installer, respectively).
 
 ## Examples
 
@@ -394,6 +400,9 @@ agentcubicle opencode \
 
 # Run a specific named container
 agentcubicle opencode --name my-session
+
+# Run without the rtk command-rewriting plugin (on by default for opencode)
+agentcubicle opencode --no-rtk
 
 # Pass arguments to opencode
 agentcubicle opencode -- --model claude-sonnet-4

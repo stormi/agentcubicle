@@ -84,6 +84,7 @@ COMMAND=""
 TOOL=""
 CMD_NAME=""
 KEEP_CONTAINER=false
+NO_RTK=false
 
 # Container engine: honor AGENTCUBICLE_ENGINE if set, otherwise auto-detect,
 # preferring podman when both are installed.
@@ -339,6 +340,10 @@ if [[ -z "$COMMAND" ]]; then
         KEEP_CONTAINER=true
         shift
         ;;
+      --no-rtk)
+        NO_RTK=true
+        shift
+        ;;
       --)
         PARSE_DASHDASH=true
         shift
@@ -419,6 +424,7 @@ RUN mkdir -p /usr/local/bin
 ENV PATH="/usr/local/bin:$PATH"
 ENV USE_BUILTIN_RIPGREP=0
 RUN set -eux; for i in 1 2 3; do ghver="$(curl -fsSL --max-time 30 https://api.github.com/repos/cli/cli/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)" && [ -n "$ghver" ] && break; sleep 5; done; case "$(uname -m)" in x86_64) gharch=amd64 ;; aarch64|arm64) gharch=arm64 ;; *) echo "agentcubicle: unsupported architecture $(uname -m) for the GitHub CLI" >/dev/stderr; exit 1 ;; esac; curl -fsSL --max-time 120 -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/${ghver}/gh_${ghver#v}_linux_${gharch}.tar.gz"; tar -xzf /tmp/gh.tgz -C /tmp; install -m 0755 "/tmp/gh_${ghver#v}_linux_${gharch}/bin/gh" /usr/local/bin/gh; rm -rf /tmp/gh.tgz "/tmp/gh_${ghver#v}_linux_${gharch}"; gh --version
+RUN set -eux; for i in 1 2 3; do rtver="$(curl -fsSL --max-time 30 https://api.github.com/repos/rtk-ai/rtk/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)" && [ -n "$rtver" ] && break; sleep 5; done; case "$(uname -m)" in x86_64) rtktarget=x86_64-unknown-linux-musl ;; aarch64|arm64) rtktarget=aarch64-unknown-linux-gnu ;; *) echo "agentcubicle: unsupported architecture $(uname -m) for rtk" >/dev/stderr; exit 1 ;; esac; curl -fsSL --max-time 120 -o /tmp/rtk.tgz "https://github.com/rtk-ai/rtk/releases/download/${rtver}/rtk-${rtktarget}.tar.gz"; tar -xzf /tmp/rtk.tgz -C /tmp; install -m 0755 /tmp/rtk /usr/local/bin/rtk; rm -f /tmp/rtk.tgz /tmp/rtk; rtk --version
 RUN if [ "$INSTALL_CLAUDE" = "true" ]; then su -s /bin/sh user -c 'export PATH="/home/user/.local/bin:$PATH" USE_BUILTIN_RIPGREP=0; curl -fsSL https://claude.ai/install.sh | bash'; fi
 EOF
     )
@@ -479,6 +485,15 @@ if [[ "$COMMAND" == "check" ]]; then
     _ok "gh"
   else
     _missing "gh"
+    MISSING=1
+  fi
+
+  # rtk is installed from a release tarball to /usr/local/bin/rtk (on PATH),
+  # like gh; it backs the opencode auto-rewrite integration.
+  if $ENGINE run --entrypoint sh --rm "$IMAGE" -c "command -v rtk >/dev/null" 2>/dev/null; then
+    _ok "rtk"
+  else
+    _missing "rtk"
     MISSING=1
   fi
 
@@ -764,6 +779,64 @@ fi
 #   so this is purely additive even when the project has its own AGENTS.md.
 OPENCODE_CONFIG_JSON=$(jq -nc --arg dir "$CONTAINER_PROJECT_DIR" \
   '{"permission":{"*":"allow"},"instructions":[$dir + "/.agentcubicle/AGENTS.local.md", $dir + "/.agentcubicle/MEMORY.local.md"]}')
+
+# RTK (https://github.com/rtk-ai/rtk) integration for opencode: a thin plugin
+# that rewrites bash/shell commands to their `rtk` equivalents before execution,
+# so command output reaches the model already compacted. The plugin content is
+# rtk's own embedded opencode plugin (hooks/opencode/rtk.ts); it is a delegating
+# shim that calls `rtk rewrite`, so the rewrite rules live in the rtk binary the
+# image ships, not here. It is only active for opencode (rtk has no claude-code
+# integration wired up here) and is skipped with --no-rtk. The file is written
+# into the container's writable opencode config dir by the entrypoint below,
+# never into the read-only host config copy or the project.
+RTK_PLUGIN_B64=""
+RTK_ENABLED=false
+RTK_TELEMETRY_DISABLED="${RTK_TELEMETRY_DISABLED:-1}"
+if [[ "$TOOL" == "opencode" ]] && ! $NO_RTK; then
+  RTK_PLUGIN_B64="$(cat <<'RTK_TS' | base64 -w0
+import type { Plugin } from "@opencode-ai/plugin"
+
+// RTK OpenCode plugin — rewrites commands to use rtk for token savings.
+// Requires: rtk >= 0.23.0 in PATH.
+//
+// This is a thin delegating plugin: all rewrite logic lives in `rtk rewrite`,
+// which is the single source of truth (src/discover/registry.rs).
+// To add or change rewrite rules, edit the Rust registry — not this file.
+
+export const RtkOpenCodePlugin: Plugin = async ({ $ }) => {
+  try {
+    await $`which rtk`.quiet()
+  } catch {
+    console.warn("[rtk] rtk binary not found in PATH — plugin disabled")
+    return {}
+  }
+
+  return {
+    "tool.execute.before": async (input, output) => {
+      const tool = String(input?.tool ?? "").toLowerCase()
+      if (tool !== "bash" && tool !== "shell") return
+      const args = output?.args
+      if (!args || typeof args !== "object") return
+
+      const command = (args as Record<string, unknown>).command
+      if (typeof command !== "string" || !command) return
+
+      try {
+        const result = await $`rtk rewrite ${command}`.quiet().nothrow()
+        const rewritten = String(result.stdout).trim()
+        if (rewritten && rewritten !== command) {
+          ;(args as Record<string, unknown>).command = rewritten
+        }
+      } catch {
+        // rtk rewrite failed — pass through unchanged
+      }
+    },
+  }
+}
+RTK_TS
+  )"
+  RTK_ENABLED=true
+fi
 
 # Forward a safe, curated subset of the host's global git config (identity +
 # a few UX settings) into the container. Allowlist, not blocklist, so we never
@@ -1139,6 +1212,10 @@ if [[ -n "$OPENCODE_REDACTED_B64" ]]; then
   EXTRA_ENVS+=("-e" "OPENCODE_REDACTED_B64=$OPENCODE_REDACTED_B64" "-e" "OPENCODE_REDACTED_BASENAME=$OPENCODE_REDACTED_BASENAME")
 fi
 
+if $RTK_ENABLED; then
+  EXTRA_ENVS+=("-e" "RTK_PLUGIN_B64=$RTK_PLUGIN_B64" "-e" "RTK_TELEMETRY_DISABLED=$RTK_TELEMETRY_DISABLED")
+fi
+
 if [[ "$TOOL" == "claude" ]]; then
   EXTRA_ENVS+=("-e" "CLAUDE_PROPAGATE_B64=$CLAUDE_PROPAGATE_B64" "-e" "CLAUDE_SEED_STRIP_JQ=$CLAUDE_SEED_STRIP_JQ")
 fi
@@ -1265,6 +1342,10 @@ if [[ "$ENGINE" == podman ]]; then
      elif [ -f /home/user/.config-host/opencode/opencode.jsonc ]; then
        cp /home/user/.config-host/opencode/opencode.jsonc /home/user/.config/opencode/
      fi
+     if [ -n "$RTK_PLUGIN_B64" ]; then
+       mkdir -p /home/user/.config/opencode/plugins
+       printf %s "$RTK_PLUGIN_B64" | base64 -d > /home/user/.config/opencode/plugins/rtk.ts
+     fi
      if [ "$TOOL" = "claude" ]; then
        CLAUDE_STATE_DIR=/home/user/project/.agentcubicle/claude-home
        mkdir -p "$CLAUDE_STATE_DIR"
@@ -1317,6 +1398,10 @@ $ENGINE run ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_A
      cp /root/.config/opencode/opencode.json /home/user/.config/opencode/
    elif [ -f /root/.config/opencode/opencode.jsonc ]; then
      cp /root/.config/opencode/opencode.jsonc /home/user/.config/opencode/
+   fi
+   if [ -n "$RTK_PLUGIN_B64" ]; then
+     mkdir -p /home/user/.config/opencode/plugins
+     printf %s "$RTK_PLUGIN_B64" | base64 -d > /home/user/.config/opencode/plugins/rtk.ts
    fi
    if [ "$TOOL" = "claude" ]; then
      CLAUDE_STATE_DIR=/home/user/project/.agentcubicle/claude-home

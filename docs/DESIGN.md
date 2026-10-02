@@ -429,6 +429,59 @@ redact, which would be worse than not redacting at all. Detection is
 per-provider and keys off literal-vs-reference, so configs already using
 `{env:...}`/`{file:...}` are unaffected.
 
+## rtk command compaction (opencode only)
+
+opencode sessions run with [rtk](https://github.com/rtk-ai/rtk) wired in:
+before it executes a bash/shell command, the command is rewritten to its
+`rtk` equivalent, so the output rtk produces (already compacted for git,
+tests, linters, `ls`, `grep`, and a few dozen other commands) is what
+reaches the model rather than the raw output. This cuts the input tokens
+spent on command output, which is the one part of the bill agentcubicle
+can influence without touching the prompt or the model.
+
+Two deliberate choices are easy to assume incorrectly:
+
+- **The rewrite rules live in the `rtk` binary, not here.** The thing
+  agentcubicle installs is rtk's own OpenCode plugin, a thin shim whose
+  only job is to call `rtk rewrite` on each command and use the result if
+  it changed. The actual per-command rewrite table lives in rtk's Rust
+  source and is updated by the rtk project, not by agentcubicle.
+  Consequence: agentcubicle's embedded plugin should only ever change if
+  rtk's plugin file itself changes, and even then it is a verbatim copy of
+  rtk's `hooks/opencode/rtk.ts`, not a reimplementation. If rtk's plugin
+  file and the embedded copy ever drift, the embedded copy is the one to
+  update to match rtk, never the reverse.
+- **The plugin is injected per-run, never written to the host or the
+  project.** It is base64-encoded into an env var and written by the
+  entrypoint into the container's *writable* opencode config dir
+  (`/home/user/.config/opencode/plugins/rtk.ts`), the same pattern as the
+  opencode config redaction above. It is not added to the read-only host
+  config mount and not placed in the project, so neither the user's real
+  `~/.config/opencode` nor the repo is ever modified. Because the container
+  `$HOME` is throwaway, this must happen on every run rather than once.
+
+rtk's binary is baked into the image from an official release tarball, the
+same way `gh` is (no apk package exists for it), with the target triple
+chosen per architecture (`x86_64-unknown-linux-musl` /
+`aarch64-unknown-linux-gnu`; the musl build is used because the image is
+Alpine/musl). It is therefore present regardless of which tool is run, but
+only opencode activates it.
+
+It is **opencode-only on purpose.** rtk supports other agents through their
+hook/plugin mechanisms, but wiring one of those in for Claude Code would be
+a second integration surface to keep current with no proportional benefit
+here; the claude path is left untouched. If that changes, the claude
+integration should get its own section rather than being folded into this
+one.
+
+Two escape hatches, both deliberate: `--no-rtk` disables the plugin for a
+single run (the binary stays in the image; only the plugin is skipped), and
+rtk's telemetry is forced off in the container by default
+(`RTK_TELEMETRY_DISABLED=1`), overridable to `0` with `--env` for anyone
+who wants to opt rtk's anonymous usage metrics back on. Defaulting to
+disabled keeps a throwaway container from phoning home without the user
+asking for it.
+
 ## Scope: opencode session state is not persisted
 
 Claude Code's per-project state is persisted via `CLAUDE_CONFIG_DIR`
