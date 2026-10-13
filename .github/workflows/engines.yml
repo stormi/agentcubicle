@@ -38,6 +38,35 @@ jobs:
       - name: Build image
         run: ./agentcubicle setup
 
+      # The per-user package list is installed on a fresh build, and a later
+      # edit is applied to the existing image as a thin layer.
+      - name: Assert user packages are installed and updated
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/.config/agentcubicle"
+          pkgfile="$HOME/.config/agentcubicle/packages"
+          # figlet is not in the default package set.
+          printf '# comment\n\nfiglet:figlet  # trailing comment\n' > "$pkgfile"
+          ./agentcubicle setup > setup-out.txt
+          cat setup-out.txt
+          grep -q "Updating user packages" setup-out.txt
+          # Capture first: `grep -q` closing the pipe early would make check fail
+          # with a broken pipe under pipefail.
+          ./agentcubicle check > check-out.txt
+          grep -q "figlet (user)" check-out.txt
+          grep -q "✓ figlet (user)" check-out.txt
+          # Unchanged list: nothing to do.
+          ./agentcubicle setup > setup-out.txt
+          grep -q "is ready" setup-out.txt
+          # A bad line is skipped with a warning; a valid one is still added.
+          printf 'figlet\nnot a package!\nsl\n' > "$pkgfile"
+          ./agentcubicle setup > setup-out.txt 2> setup-err.txt
+          cat setup-out.txt setup-err.txt
+          grep -q "ignoring invalid package" setup-err.txt
+          ./agentcubicle check > check-out.txt
+          grep -q "✓ sl (user)" check-out.txt
+          rm -f "$pkgfile"
+
       # Seed the host opencode config BEFORE any container runs. If left to the
       # first run, mounting the nonexistent config dir as a bind source makes
       # docker auto-create it root-owned on the host (and trips podman), so it
