@@ -195,8 +195,8 @@ _seed_if_absent() {
 # line, in the same "pkg" or "pkg:binary" form as REQUIRED_PACKAGES. Blank
 # lines and anything after a # are ignored. It lives in the host config
 # directory, not in the project: .agentcubicle/ is mounted into the container,
-# and this file drives root-level changes to the image, so the agent must not
-# be able to edit it.
+# and these files drive root-level changes to the image, so the agent must not
+# be able to edit them.
 USER_CONFIG_DIR="$HOME/.config/agentcubicle"
 USER_PACKAGES_FILE="$USER_CONFIG_DIR/packages"
 USER_PACKAGES=()
@@ -217,6 +217,18 @@ _read_user_packages() {
       echo "agentcubicle: ignoring invalid package '$line' at $USER_PACKAGES_FILE:$n" >&2
     fi
   done < "$USER_PACKAGES_FILE"
+}
+
+# Optional shell script run as root at the end of a fresh image build, for
+# tools that are not Alpine packages. It is not tracked: it only runs when the
+# image is built (first `setup`, or `setup --clear`), never as an update.
+USER_INSTALL_FILE="$USER_CONFIG_DIR/install.sh"
+
+# install.sh runs only when the image is built, so on an existing image it is
+# skipped; say so, since a plain `setup` otherwise gives no hint.
+_note_install_skipped() {
+  [[ -f "$USER_INSTALL_FILE" ]] || return 0
+  echo "Note: $USER_INSTALL_FILE only runs when the image is built; use 'setup --clear' to apply changes to it."
 }
 
 # Hash of the user's package names (order- and binary-independent), stored on
@@ -466,6 +478,7 @@ if [[ "$COMMAND" == "setup" ]]; then
       if $HAS_CLAUDE; then
         echo "Claude Code is also installed."
       fi
+      _note_install_skipped
       exit 0
     fi
   else
@@ -485,6 +498,9 @@ if [[ "$COMMAND" == "setup" ]]; then
     if [[ ${#USER_PKG_NAMES[@]} -gt 0 ]]; then
       echo "agentcubicle: if a package from $USER_PACKAGES_FILE is the cause, check its name (Alpine packages only)." >&2
     fi
+    if [[ -n "$USER_INSTALL_B64" ]]; then
+      echo "agentcubicle: if $USER_INSTALL_FILE is the cause, see its traced output above (it runs as root, with sh -eux)." >&2
+    fi
   }
 
   # Build base + optionally claude in one go
@@ -493,13 +509,19 @@ if [[ "$COMMAND" == "setup" ]]; then
     BUILD_CLAUDE=true
   fi
 
+  USER_INSTALL_B64=""
+  if $NEEDS_BASE && [[ -f "$USER_INSTALL_FILE" ]]; then
+    USER_INSTALL_B64="$(base64 < "$USER_INSTALL_FILE" | tr -d '\n')"
+  fi
+
   if $NEEDS_BASE; then
     echo "Building $COMMIT_TARGET with dev tools ..."
-    if ! $ENGINE build ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} --build-arg PACKAGES="${PKG_NAMES[*]} ${USER_PKG_NAMES[*]:-}" --build-arg INSTALL_CLAUDE="$BUILD_CLAUDE" --label "agentcubicle.user-packages=$USER_PKGS_HASH" -t "$COMMIT_TARGET" - < <(
+    if ! $ENGINE build ${NO_CACHE_ARGS[@]+"${NO_CACHE_ARGS[@]}"} --build-arg PACKAGES="${PKG_NAMES[*]} ${USER_PKG_NAMES[*]:-}" --build-arg INSTALL_CLAUDE="$BUILD_CLAUDE" --build-arg USER_INSTALL_B64="$USER_INSTALL_B64" --label "agentcubicle.user-packages=$USER_PKGS_HASH" -t "$COMMIT_TARGET" - < <(
       cat <<'EOF'
 FROM ghcr.io/anomalyco/opencode
 ARG PACKAGES
 ARG INSTALL_CLAUDE
+ARG USER_INSTALL_B64
 RUN apk add --no-cache $PACKAGES bash libgcc libstdc++ ripgrep shadow
 RUN addgroup -g 1000 user 2>/dev/null || true
 RUN adduser -u 1000 -G user -D -h /home/user user 2>/dev/null || true
@@ -508,6 +530,7 @@ ENV PATH="/usr/local/bin:$PATH"
 ENV USE_BUILTIN_RIPGREP=0
 RUN set -eux; for i in 1 2 3; do ghver="$(curl -fsSL --max-time 30 https://api.github.com/repos/cli/cli/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)" && [ -n "$ghver" ] && break; sleep 5; done; case "$(uname -m)" in x86_64) gharch=amd64 ;; aarch64|arm64) gharch=arm64 ;; *) echo "agentcubicle: unsupported architecture $(uname -m) for the GitHub CLI" >/dev/stderr; exit 1 ;; esac; curl -fsSL --max-time 120 -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/${ghver}/gh_${ghver#v}_linux_${gharch}.tar.gz"; tar -xzf /tmp/gh.tgz -C /tmp; install -m 0755 "/tmp/gh_${ghver#v}_linux_${gharch}/bin/gh" /usr/local/bin/gh; rm -rf /tmp/gh.tgz "/tmp/gh_${ghver#v}_linux_${gharch}"; gh --version
 RUN if [ "$INSTALL_CLAUDE" = "true" ]; then su -s /bin/sh user -c 'export PATH="/home/user/.local/bin:$PATH" USE_BUILTIN_RIPGREP=0; curl -fsSL https://claude.ai/install.sh | bash'; fi
+RUN if [ -n "$USER_INSTALL_B64" ]; then echo "$USER_INSTALL_B64" | base64 -d > /tmp/user-install.sh && sh -eux /tmp/user-install.sh && rm -f /tmp/user-install.sh; fi
 EOF
     ); then
       _user_pkgs_hint
@@ -556,6 +579,12 @@ EOF
     if $HAS_CLAUDE; then
       echo "Claude Code is already installed."
     fi
+  fi
+
+  # The image existed and was only updated on top (user packages and/or
+  # Claude): install.sh did not run.
+  if ! $NEEDS_BASE; then
+    _note_install_skipped
   fi
 
   exit 0

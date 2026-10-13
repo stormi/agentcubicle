@@ -469,6 +469,30 @@ Removing a line does not uninstall the package from an existing image: run
 
 The image and the list are both shared by all your projects.
 
+### Tools that are not Alpine packages
+
+For anything `apk` does not carry (a release tarball, a `curl | sh` installer),
+put a shell script in `~/.config/agentcubicle/install.sh`. It runs as root, with
+`sh -eux`, at the end of the image build, after the packages and `gh`, so a
+failing command fails `setup`. Follow what `gh` does and install into
+`/usr/local/bin`, which is on the PATH. For something that belongs in the
+user's home, drop privileges as the Claude install does:
+`su -s /bin/sh user -c '...'`.
+
+The script's content is passed to the build as a build argument, so it is
+recorded in the image history (`docker history`, `podman history`). Do not put
+tokens or other secrets in it.
+
+```sh
+# ~/.config/agentcubicle/install.sh
+curl -fsSL https://example.com/tool.tgz | tar -xz -C /usr/local/bin tool
+```
+
+Unlike `packages`, the script is not tracked: it only runs when the image is
+built, so after editing it run `agentcubicle setup --clear` (adding `--claude`
+if you want Claude Code). A plain `setup` on an existing image leaves it alone
+and says so. `check` does not verify what the script installed.
+
 ## Examples
 
 ### Setup

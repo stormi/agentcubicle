@@ -136,16 +136,19 @@ host-only file.
 ## User-configured packages
 
 Users can add Alpine packages through a per-user file,
-`~/.config/agentcubicle/packages`.
+`~/.config/agentcubicle/packages`, and other tools through
+`~/.config/agentcubicle/install.sh`.
 
-- **Per user, outside the project.** The file lives in
+- **Per user, outside the project.** Both files live in
   `~/.config/agentcubicle/`, not in `.agentcubicle/`. That directory is
   bind-mounted into the container (the agent's rules, memory and Claude
-  state live there), so anything in it is editable by the agent. The file
-  decides what is installed into the image as root on the host's next
-  `setup`, outside the sandbox, and the host config directory is not
-  mounted into the container. It also matches the image, which is a single
-  shared `agentcubicle` for all projects: there is one list, so there is no "last project wins" ambiguity.
+  state live there), so anything in it is editable by the agent. These files
+  decide what is installed into the image as root, and `install.sh` is
+  arbitrary code: a project-local copy would let the agent write a script
+  that runs as root on the host's next `setup`, outside the sandbox. The
+  host config directory is not mounted into the container. It also matches
+  the image, which is a single shared `agentcubicle` for all
+  projects: there is one list, so there is no "last project wins" ambiguity.
   The path is fixed at `$HOME/.config/agentcubicle`, like the existing
   `$HOME/.config/opencode` lookup, and `XDG_CONFIG_HOME` is not consulted.
   Per-project lists would need a per-project image, which is not worth it
@@ -167,6 +170,19 @@ Users can add Alpine packages through a per-user file,
   the image, because `apk del` in a new layer would not reclaim the space and
   could break things that came to depend on it. `setup --clear` is the way
   to drop one.
+- **`install.sh` for non-apk tools, untracked.** A shell script at
+  `~/.config/agentcubicle/install.sh` is passed to the build as a base64 build arg
+  (the build reads its Dockerfile from stdin, so there is no context for
+  `COPY`, and base64 avoids quoting problems) and run as root with
+  `sh -eux` as the last build step. It follows `gh`: root, installing into
+  `/usr/local/bin`. It gets no hash label, unlike `packages`: an arbitrary
+  script cannot be diffed or applied incrementally, and re-running it on top
+  of a previous layer would have to be idempotent. So it only runs on a
+  fresh build, and the user applies changes with `setup --clear`. `setup`
+  prints a reminder when the file exists and the image does not need
+  building. `check` cannot verify what it installed. The cost of the build
+  arg is that its value is recorded in the image history, so the script is
+  not a place for secrets; the README says so.
 
 ## Container engine (Docker and Podman)
 

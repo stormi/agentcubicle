@@ -35,8 +35,28 @@ jobs:
           id
           if [ "$AGENTCUBICLE_ENGINE" = podman ]; then cat /etc/subuid /etc/subgid; fi
 
+      # Seeded before the first build so it runs there, at no extra build cost.
+      - name: Seed user install script
+        run: |
+          set -eux
+          mkdir -p "$HOME/.config/agentcubicle"
+          printf 'touch /usr/local/bin/ci-install-marker\n' > "$HOME/.config/agentcubicle/install.sh"
+
       - name: Build image
         run: ./agentcubicle setup
+
+      # install.sh ran as root during the build, and a plain setup on the
+      # existing image skips it and says so.
+      - name: Assert user install script ran
+        run: |
+          set -euxo pipefail
+          img=agentcubicle
+          if [ "$AGENTCUBICLE_ENGINE" = podman ]; then img=localhost/agentcubicle; fi
+          "$AGENTCUBICLE_ENGINE" run --rm --entrypoint sh "$img" -c 'test -f /usr/local/bin/ci-install-marker'
+          ./agentcubicle setup > setup-out.txt
+          cat setup-out.txt
+          grep -q "only runs when the image is built" setup-out.txt
+          rm -f "$HOME/.config/agentcubicle/install.sh"
 
       # The per-user package list is installed on a fresh build, and a later
       # edit is applied to the existing image as a thin layer.
