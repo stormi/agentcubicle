@@ -32,7 +32,7 @@
 #   agentcubicle opencode --name my-session
 #   agentcubicle opencode --keep-container
 #   agentcubicle claude --account perso
-#   agentcubicle claude --env ANTHROPIC_API_KEY="$(cat ~/.claude-key)"
+#   ANTHROPIC_API_KEY="$(cat ~/.claude-key)" agentcubicle claude --env ANTHROPIC_API_KEY
 #   agentcubicle opencode --mount /etc/ssh:/etc/ssh:ro
 #   agentcubicle share create xchg
 #   agentcubicle claude --share xchg
@@ -367,7 +367,8 @@ _print_run_help() {
   echo "  --mount SRC:DST[:ro]       Extra bind mount, passed to the engine as -v. Repeatable."
   echo "  --share NAME[:ro|:rw]      Mount named share NAME at /shares/NAME, read-write by default. Repeatable."
   echo "  --share-dir PATH[:ro|:rw]  Mount host directory PATH at /shares/<basename>, read-only by default. Repeatable."
-  echo "  --env VAR=VALUE            Extra environment variable. Repeatable."
+  echo "  --env VAR[=VALUE]          Extra environment variable. VAR alone takes its value from your"
+  echo "                             environment, which keeps secrets off the command line. Repeatable."
   echo "  --keep-container           Keep the container after $1 exits"
   if [[ "$1" == claude ]]; then
     echo "  --account NAME             Use ~/.claude/oauth-token-NAME instead of ~/.claude/oauth-token"
@@ -1738,9 +1739,11 @@ fi
 # `agentcubicle claude` just works with no flags, once set up once. Only
 # for the claude tool, and only if the caller hasn't already set it via --env.
 if [[ "$TOOL" == "claude" ]]; then
+  # A bare --env CLAUDE_CODE_OAUTH_TOKEN (value taken from the host
+  # environment by the engine) counts as explicit too.
   HAS_EXPLICIT_TOKEN=false
   for env_entry in "${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}"; do
-    if [[ "$env_entry" == CLAUDE_CODE_OAUTH_TOKEN=* ]]; then
+    if [[ "$env_entry" == CLAUDE_CODE_OAUTH_TOKEN || "$env_entry" == CLAUDE_CODE_OAUTH_TOKEN=* ]]; then
       HAS_EXPLICIT_TOKEN=true
       break
     fi
@@ -1763,6 +1766,10 @@ if [[ "$TOOL" == "claude" ]]; then
   CLAUDE_HAS_CREDENTIALS=false
   for env_entry in "${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}"; do
     if [[ "$env_entry" == CLAUDE_CODE_OAUTH_TOKEN=* || "$env_entry" == ANTHROPIC_API_KEY=* ]]; then
+      CLAUDE_HAS_CREDENTIALS=true
+      break
+    fi
+    if [[ ( "$env_entry" == CLAUDE_CODE_OAUTH_TOKEN || "$env_entry" == ANTHROPIC_API_KEY ) && -n "${!env_entry:-}" ]]; then
       CLAUDE_HAS_CREDENTIALS=true
       break
     fi
@@ -1948,6 +1955,46 @@ if $KEEP_CONTAINER; then
   RUN_RM_ARGS=()
 fi
 
+# A value passed as -e NAME=VALUE sits on the engine command line, which every
+# account on the host can read (ps, /proc/<pid>/cmdline) for as long as the
+# container runs: the Claude token, opencode provider keys, the forwarded
+# gitconfig. _run_engine passes -e NAME instead and puts the value in the
+# environment of the engine process, which only its owner and root can read.
+# Both engines take the value of a bare -e NAME from their own environment.
+# Names the engine client reads for itself stay on the command line (HOME for
+# its config, XDG_RUNTIME_DIR for rootless podman, PATH, ...), as do names
+# that are not shell identifiers or that bash will not export. The exports
+# happen in a subshell, after the command is built, so a --env name cannot
+# change the variables of this script.
+ENV_ON_ARGV_RE='^(HOME|PATH|TMPDIR|XDG_RUNTIME_DIR|IFS|UID|EUID|PPID|SHELLOPTS|BASHOPTS|BASH.*|LD_.*|DOCKER_.*|CONTAINER.*|PODMAN_.*|_AC_.*)$'
+
+# Usage: RUN_ENV_ARGS=(-e K=V ...); _run_engine <engine run args...>
+_run_engine() {
+  local -a env_argv=() env_values=()
+  local entry name is_flag=true
+  for entry in ${RUN_ENV_ARGS[@]+"${RUN_ENV_ARGS[@]}"}; do
+    if $is_flag; then
+      is_flag=false
+      continue
+    fi
+    is_flag=true
+    name="${entry%%=*}"
+    if [[ "$entry" == *=* && "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && ! "$name" =~ $ENV_ON_ARGV_RE ]]; then
+      env_argv+=(-e "$name")
+      env_values+=("$entry")
+    else
+      env_argv+=(-e "$entry")
+    fi
+  done
+  local -a _AC_CMD=("$ENGINE" run ${env_argv[@]+"${env_argv[@]}"} "$@")
+  (
+    for entry in ${env_values[@]+"${env_values[@]}"}; do
+      export "${entry?}"
+    done
+    exec "${_AC_CMD[@]}"
+  )
+}
+
 if [[ "$ENGINE" == podman ]]; then
   # Rootless podman: --userns=keep-id maps the host user onto the image's baked
   # UID 1000, so we run as that user directly (no root remap phase) and files
@@ -1955,7 +2002,13 @@ if [[ "$ENGINE" == podman ]]; then
   # read-only under /home/user (see CONFIG_HOME_MOUNT_ARGS) and copied into
   # place by the entrypoint, since the unprivileged user cannot read /root.
   # No usermod/groupmod/chown: keep-id already gives files the right owner.
-  $ENGINE run ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_ARGS[@]}"} \
+  RUN_ENV_ARGS=(
+    -e HOME=/home/user
+    -e "INNER_B64=$INNER_B64"
+    -e "TOOL=$TOOL"
+    ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}
+  )
+  _run_engine ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_ARGS[@]}"} \
     --name "$CONTAINER_NAME" \
     --entrypoint sh \
     --userns=keep-id:uid=1000,gid=1000 \
@@ -1964,10 +2017,6 @@ if [[ "$ENGINE" == podman ]]; then
     -v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw" \
     ${CONFIG_HOME_MOUNT_ARGS[@]+"${CONFIG_HOME_MOUNT_ARGS[@]}"} \
     ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
-    -e HOME=/home/user \
-    -e "INNER_B64=$INNER_B64" \
-    -e "TOOL=$TOOL" \
-    ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"} \
     "$IMAGE" \
     -c \
     'mkdir -p /home/user/.config/opencode
@@ -2006,19 +2055,21 @@ if [[ "$ENGINE" == podman ]]; then
     _ ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 else
 # Container starts as root → remaps `user` UID/GID to host → su's to user.
-$ENGINE run ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_ARGS[@]}"} \
+RUN_ENV_ARGS=(
+  -e HOME=/root
+  -e "HOST_UID=$(id -u)"
+  -e "HOST_GID=$(id -g)"
+  -e "INNER_B64=$INNER_B64"
+  -e "TOOL=$TOOL"
+  ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}
+)
+_run_engine ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_ARGS[@]}"} \
   --name "$CONTAINER_NAME" \
   --entrypoint sh \
   -w "$CONTAINER_PROJECT_DIR" \
   -v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw" \
   ${CONFIG_HOME_MOUNT_ARGS[@]+"${CONFIG_HOME_MOUNT_ARGS[@]}"} \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
-  -e HOME=/root \
-  -e "HOST_UID=$(id -u)" \
-  -e "HOST_GID=$(id -g)" \
-  -e "INNER_B64=$INNER_B64" \
-  -e "TOOL=$TOOL" \
-  ${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"} \
   "$IMAGE" \
   -c \
   'groupmod -g $HOST_GID user

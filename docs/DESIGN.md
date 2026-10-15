@@ -221,6 +221,39 @@ dir rather than reusing the host `/run/user/<uid>` path. Both engine paths
 (file ownership round-trip and host config forwarding) are exercised by the
 `engines` CI workflow; the clipboard path is not (runners are headless).
 
+## Environment values go through the engine's environment
+
+Every value the container needs from the host (the Claude token, opencode
+provider keys, the base64 blobs for the inner command, forwarded gitconfig
+and propagated settings, `--env NAME=value`) used to be passed as
+`-e NAME=VALUE`, which put it on the engine's command line. Any account on
+the host can read that (`ps`, `/proc/<pid>/cmdline`) for as long as the
+container runs; the Claude token was found that way in a plain `ps -edf`.
+`_run_engine` now passes `-e NAME` and exports the value only in a subshell
+that `exec`s the engine. Both engines take a bare `-e NAME` from their own
+environment, and `/proc/<pid>/environ` is readable only by the owner and
+root. The command is built before the exports, so a user `--env` name cannot
+change a variable of the script itself (`--env IMAGE=...` stays a container
+variable).
+
+Some names keep their value on the command line: the ones the engine client
+reads for itself (`HOME` for its config, `XDG_RUNTIME_DIR` for rootless
+podman, `PATH`, `TMPDIR`, `LD_*`, `DOCKER_*`, `CONTAINER*`, `PODMAN_*`), names
+that are not shell identifiers, and the few bash will not export (`UID`,
+`BASH*` and so on). Exporting `HOME=/root` into the docker client, for
+instance, would make it look for `/root/.docker/config.json`.
+
+`--env-file` with a 0600 temporary file was the alternative. It needs
+creating and removing, with a file left behind if the script is killed, and
+its format cannot carry a value containing a newline. The environment needs
+neither.
+
+What this does not cover, stated in the README: values typed on
+agentcubicle's own command line (`--env NAME=value`) stay visible there,
+since the script keeps running for its EXIT trap, so the documented form for
+a secret is an exported variable and `--env NAME`. And anyone who can reach
+the engine API reads container environments with `inspect` regardless.
+
 ## Running as root is not supported
 
 agentcubicle exits with an error if `id -u` is 0, before engine detection, for

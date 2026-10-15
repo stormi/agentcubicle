@@ -111,8 +111,10 @@ Without any provider configured there, only opencode's built-in free fallback mo
 ```
 
 ```sh
-agentcubicle opencode --env LITELLM_API_KEY="$(cat ~/.litellm-key)"
+LITELLM_API_KEY="$(cat ~/.litellm-key)" agentcubicle opencode --env LITELLM_API_KEY
 ```
+
+`--env` with a name alone takes the value from your environment, which keeps the key out of the process list (see [Environment values and the command line](#environment-values-and-the-command-line)). `--env LITELLM_API_KEY="..."` works too.
 
 The same `{env:VAR}` + `--env` pattern works for a hosted vendor too. opencode ships built-in support for the common ones, so the config is just an API key:
 
@@ -137,7 +139,7 @@ If none of those are found, `agentcubicle claude` detects this itself and, inste
 3. Open the URL in a browser, log into your Claude account, and authorize. The browser session decides which account the token belongs to, so use a private window if you are logged into a different account there.
 4. `claude setup-token` prints a long-lived token. Paste it at the prompt that follows (input is hidden) and press Enter.
 5. The container exits, and agentcubicle saves the token on the host to `~/.claude/oauth-token` (mode 600). The container never has write access to `~/.claude`: the token passes through a temporary file in the project's `.agentcubicle/` directory, which is moved into place and removed once the container exits.
-6. Run `agentcubicle claude` again. It starts straight into a session; from now on, plain `agentcubicle claude` picks the token up with no `--env` needed. (You can still pass `--env CLAUDE_CODE_OAUTH_TOKEN=...` explicitly to override it for one run.)
+6. Run `agentcubicle claude` again. It starts straight into a session; from now on, plain `agentcubicle claude` picks the token up with no `--env` needed. (You can still pass `--env CLAUDE_CODE_OAUTH_TOKEN` explicitly, with the token exported in your shell, to override it for one run.)
 
 If you press Enter without pasting anything, the bootstrap prints the manual steps instead and leaves you in a shell to do them: write the token into the bind-mounted project directory (`echo "<token>" > /home/user/project/.claude-oauth-token`), exit, then on the host `mkdir -p ~/.claude && mv .claude-oauth-token ~/.claude/oauth-token && chmod 600 ~/.claude/oauth-token`.
 
@@ -153,9 +155,9 @@ agentcubicle claude --account perso   # later runs: session with that account
 agentcubicle claude                   # unchanged: ~/.claude/oauth-token
 ```
 
-With `--account`, only that account's file is used: a `CLAUDE_CODE_OAUTH_TOKEN` exported in your shell is ignored, so it can't silently replace the account you named. An explicit `--env CLAUDE_CODE_OAUTH_TOKEN=...` still wins. Names may only contain letters, digits, `-` and `_`. The account only changes which token is forwarded: the project's `.agentcubicle/claude-home/` (settings, memory, transcripts) is the same whichever account you use.
+With `--account`, only that account's file is used: a `CLAUDE_CODE_OAUTH_TOKEN` exported in your shell is ignored, so it can't silently replace the account you named. An explicit `--env CLAUDE_CODE_OAUTH_TOKEN` (name alone or `=value`) still wins. Names may only contain letters, digits, `-` and `_`. The account only changes which token is forwarded: the project's `.agentcubicle/claude-home/` (settings, memory, transcripts) is the same whichever account you use.
 
-Why a static token instead of just logging in fresh each time: normal OAuth credentials refresh via a single-use, rotating refresh token, and copying or read-only-mounting that file into containers breaks the moment any container (or the host) refreshes it, invalidating the others. `claude setup-token` produces a long-lived (about a year), non-rotating token instead, so the same one can be reused across many container runs. If you'd rather use API-key billing instead of your subscription, use `--env ANTHROPIC_API_KEY="$(cat ~/.claude-key)"` instead (see the `claude code` examples below). No token bootstrap needed for that path.
+Why a static token instead of just logging in fresh each time: normal OAuth credentials refresh via a single-use, rotating refresh token, and copying or read-only-mounting that file into containers breaks the moment any container (or the host) refreshes it, invalidating the others. `claude setup-token` produces a long-lived (about a year), non-rotating token instead, so the same one can be reused across many container runs. If you'd rather use API-key billing instead of your subscription, export `ANTHROPIC_API_KEY` and pass `--env ANTHROPIC_API_KEY` instead (see the `claude code` examples below). No token bootstrap needed for that path.
 
 ## Commits, not pushes
 
@@ -385,11 +387,20 @@ If no subcommand is given, a new container is started based on `agentcubicle` wi
 | `--mount P` | Extra mount, e.g. `--mount /etc/ssh:/etc/ssh:ro`. Repeatable.  |
 | `--share S` | Mount the named share `S` at `/shares/S`, read-write by default; `S:ro` mounts it read-only. The share must exist (`share create`). Repeatable. |
 | `--share-dir D` | Mount host directory `D` at `/shares/<basename of D>` for this session, **read-only by default**; `D:rw` mounts it read-write. Repeatable. |
-| `--env E`   | Extra env var, e.g. `--env ANTHROPIC_API_KEY="sk-ant-..."`. Repeatable. |
+| `--env E`   | Extra env var: `--env NAME=value`, or `--env NAME` to take the value from your environment (keeps it out of the process list, see below). Repeatable. |
 | `--keep-container` | Keep the container after the tool exits. Without it, the container is removed on exit. |
 | `--account A` | `claude` only: use the token in `~/.claude/oauth-token-A` instead of `~/.claude/oauth-token` (see [Using another Claude account](#using-another-claude-account)). |
 | `-h`, `--help` | Show agentcubicle's options for running the tool, without starting a container. For the tool's own help, use `agentcubicle claude -- --help`. |
 | `--`        | Pass remaining arguments directly to the tool                  |
+
+### Environment values and the command line
+
+A process's command line can be read by every account on the host (`ps`, `/proc/<pid>/cmdline`) for as long as it runs, while its environment can only be read by its owner and root. So agentcubicle gives the engine every value it forwards (the Claude token, opencode provider keys, the forwarded git config, `--env NAME=value`) through the engine's environment, and only the variable name on its command line. A few names stay on the command line with their value, because the engine reads them for itself: `HOME`, `PATH`, `TMPDIR`, `XDG_RUNTIME_DIR`, and names starting with `LD_`, `DOCKER_`, `CONTAINER` or `PODMAN_`. Names that are not valid shell variable names stay there too.
+
+Two limits:
+
+- `agentcubicle` itself keeps running for the whole session, so what you type on *its* command line, `--env NAME=value` included, shows in `ps` until you exit. For a secret, export it and pass the name only: `ANTHROPIC_API_KEY="$(cat ~/.claude-key)" agentcubicle claude --env ANTHROPIC_API_KEY`. Values agentcubicle reads from files itself, such as `~/.claude/oauth-token`, never appear there.
+- This only keeps values out of the process list. Anyone who can talk to the container engine can still read them with `docker inspect` or `podman inspect`. With Docker that means every member of the `docker` group, and every local process if `dockerd` listens on TCP without TLS. Anything running inside the container can read them too.
 
 ### Sharing files between containers
 
@@ -594,11 +605,11 @@ agentcubicle setup --clear
 ```sh
 # Provide a provider API key referenced in your opencode.json as {env:VAR}
 # (see "Configuring opencode models and providers" above)
-agentcubicle opencode --env ANTHROPIC_API_KEY="$(cat ~/.anthropic-key)"
+ANTHROPIC_API_KEY="$(cat ~/.anthropic-key)" agentcubicle opencode --env ANTHROPIC_API_KEY
 
 # Run opencode with extra mounts and a GitHub token
-agentcubicle opencode \
-  --env GITHUB_TOKEN="$(cat github-PAT)" \
+GITHUB_TOKEN="$(cat github-PAT)" agentcubicle opencode \
+  --env GITHUB_TOKEN \
   --mount /etc/ssh:/etc/ssh:ro
 
 # Run a specific named container
@@ -616,7 +627,7 @@ agentcubicle opencode -- --model claude-sonnet-4
 agentcubicle claude
 
 # Alternative: API-key billing instead of your subscription
-agentcubicle claude --env ANTHROPIC_API_KEY="$(cat ~/.claude-key)"
+ANTHROPIC_API_KEY="$(cat ~/.claude-key)" agentcubicle claude --env ANTHROPIC_API_KEY
 
 # Run claude code with extra mounts
 agentcubicle claude --mount /etc/ssh:/etc/ssh:ro
