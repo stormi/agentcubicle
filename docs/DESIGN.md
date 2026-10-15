@@ -244,6 +244,26 @@ This is separate from the Ctrl+Z problem (a suspended tool has no shell to
 resume it from), which still stands: the init forwards signals but is not a
 job-control shell.
 
+## Timezone
+
+Containers used to run in UTC with no zone data at all, so local dates were
+off and named-zone lookups failed (`zoneinfo.ZoneInfo("Europe/Paris")` raised
+`ZoneInfoNotFoundError`). The image now installs `tzdata`, and the host zone
+is forwarded as `TZ`, taken from the host `TZ` or else the `/etc/localtime`
+symlink target, cut down to the part after `zoneinfo/` (absolute, relative
+as systemd writes it, or the macOS location). Mounting `/etc/localtime`
+instead was not chosen: it is a symlink on most hosts and its target is not
+in the container, and it would not give programs that read `TZ` a name.
+
+Only values that look like a zone name are forwarded. A POSIX rule string
+would work without tzdata, but it is rare as a host setting, and the strict
+pattern also keeps arbitrary paths out. `tzdata` has no executable, so its
+`REQUIRED_PACKAGES` entry is `tzdata:` (empty binary), which `check` tests
+with `apk info -e`. Existing images get it only through `setup --clear`
+(the thin-layer update for new required packages was considered and left
+out); with no zone data musl treats an unknown `TZ` as UTC, so an old image
+just keeps the old behaviour.
+
 ## Environment values go through the engine's environment
 
 Every value the container needs from the host (the Claude token, opencode

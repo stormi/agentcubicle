@@ -509,7 +509,8 @@ if [[ "$ENGINE" == podman && "$COMMIT_TARGET" != */* ]]; then
 fi
 
 # Packages and the binary to check for them. Format: "package:binary"
-# If no colon, the binary has the same name as the package.
+# If no colon, the binary has the same name as the package. An empty binary
+# ("package:") marks a package with no executable, checked with apk instead.
 REQUIRED_PACKAGES=(
   "bat"
   "build-base:make"
@@ -545,6 +546,7 @@ REQUIRED_PACKAGES=(
   "tcpdump"
   "tmux"
   "tree"
+  "tzdata:"
   "uv:uvx"
   "valgrind"
   "vim"
@@ -1050,7 +1052,11 @@ if [[ "$COMMAND" == "check" ]]; then
   for entry in "${REQUIRED_PACKAGES[@]}"; do
     PKG="${entry%%:*}"
     BIN="$(_pkg_to_bin "$entry")"
-    if $ENGINE run --entrypoint sh --rm "$IMAGE" -c "command -v $BIN >/dev/null" 2>/dev/null; then
+    CHECK_CMD="command -v $BIN >/dev/null"
+    if [[ -z "$BIN" ]]; then
+      CHECK_CMD="apk info -e $PKG >/dev/null"
+    fi
+    if $ENGINE run --entrypoint sh --rm "$IMAGE" -c "$CHECK_CMD" 2>/dev/null; then
       _ok "$PKG"
     else
       _missing "$PKG"
@@ -1789,6 +1795,38 @@ for env_entry in "${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}"; do
 done
 if ! $HAS_EXPLICIT_PROJECT_NAME; then
   EXTRA_ENVS+=("-e" "AGENTCUBICLE_PROJECT_NAME=$(basename "$WORKDIR")")
+fi
+
+# Containers run in UTC otherwise, so dates, logs and the timestamps of commits
+# made in the container would not match the host. Forward the host zone name
+# as TZ (the image has tzdata), from TZ if the host sets one, else from where
+# /etc/localtime points (/usr/share/zoneinfo/Europe/Paris on Linux, relative
+# ../usr/share/zoneinfo/... where systemd set it, /var/db/timezone/zoneinfo/...
+# on macOS). A path outside a zoneinfo directory, or anything else that does
+# not look like a zone name (a POSIX rule string, say), is not forwarded. --env TZ=... overrides it, and --env TZ= gives UTC.
+# Prints the zone name in a TZ value or /etc/localtime target, or nothing.
+_tz_name() {
+  local tz="${1#:}"
+  if [[ "$tz" == */zoneinfo/* ]]; then
+    tz="${tz##*/zoneinfo/}"
+  fi
+  if [[ "$tz" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]]; then
+    printf '%s' "$tz"
+  fi
+}
+HOST_TZ="$(_tz_name "${TZ:-}")"
+if [[ -z "$HOST_TZ" && -L /etc/localtime ]]; then
+  HOST_TZ="$(_tz_name "$(readlink /etc/localtime)")"
+fi
+HAS_EXPLICIT_TZ=false
+for env_entry in "${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}"; do
+  if [[ "$env_entry" == TZ || "$env_entry" == TZ=* ]]; then
+    HAS_EXPLICIT_TZ=true
+    break
+  fi
+done
+if [[ -n "$HOST_TZ" ]] && ! $HAS_EXPLICIT_TZ; then
+  EXTRA_ENVS+=("-e" "TZ=$HOST_TZ")
 fi
 
 if [[ -n "$HOST_GITCONFIG_B64" ]]; then

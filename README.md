@@ -516,6 +516,7 @@ The project name is derived from the current working directory basename, with no
     - The Podman clipboard path has not been verified on a real desktop yet; report back if it misbehaves.
 12. **Git**: `/home/user/project` is registered as a safe directory so git operations work without warnings.
 13. **Init process**: containers start with the engine's `--init`, so a small init (`docker-init`, which is tini, under Docker; `catatonit` under Podman) runs as PID 1 and the tool runs under it. It reaps processes left behind by the tool (for instance `xclip` keeping the clipboard), which would otherwise stay as zombies until the container exits. If a container fails to start with an error about `docker-init` or `catatonit` not being found, your engine install does not include it: install your distribution's package for it (`catatonit` for Podman; for Docker, the package that provides `docker-init`, often `tini`).
+14. **Timezone**: the image has `tzdata`, and the host's zone is forwarded as `TZ`, so dates, logs and the timestamps of commits made in the container use your local time instead of UTC, and zone lookups (Python's `zoneinfo`, for example) work. The zone comes from `TZ` if your shell sets one, otherwise from where `/etc/localtime` points. Only a zone name is forwarded (`Europe/Paris`): a value that is not one, such as a POSIX rule string, is skipped and the container stays in UTC. `--env TZ=Asia/Tokyo` picks another zone and `--env TZ=` keeps UTC. An image built before `tzdata` was added does not get it from a plain `setup`: run `agentcubicle setup --clear` (add `--claude` if you use claude) to rebuild it. Until then, the forwarded zone is unknown in the container, which then stays in UTC.
 
 ## Installed packages
 
@@ -530,7 +531,7 @@ The following packages are installed in the `agentcubicle` image:
 | **CLI tools**| `bat`, `diffutils`, `file`, `fzf`, `jq`, `lsof`, `patch`, `perl`, `sqlite`, `shellcheck`, `tree`                                                              |
 | **Network**  | `curl`, `curlie`, `httpie`, `nmap`, `netcat-openbsd`, `tcpdump`, `wrk`                                                                                         |
 | **Languages**| `lua5.4`, `luajit`, `nodejs`, `python3`, `py3-pip`, `uv`                                                                                                       |
-| **System**   | `htop`, `tmux`, `bash`                                                                                                                                         |
+| **System**   | `htop`, `tmux`, `bash`, `tzdata`                                                                                                                               |
 | **Clipboard**| `wl-clipboard`, `xclip`                                                                                                                                        |
 | **AI tools** | `opencode` (from base image), `claude` (optional, installed via `setup --claude`)                                                                              |
 
