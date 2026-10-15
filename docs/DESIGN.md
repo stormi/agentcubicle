@@ -691,6 +691,19 @@ with `agentcubicle share create|list|rm`, and enabled per container with
   instruction mentions them (Claude Code only sees them listed as
   additional directories); the user points the agent at `/shares/NAME`
   when it matters. Keeps the seeded templates unchanged.
+- **Mailbox seed is opt-in (`share create NAME --mailbox`).** A share
+  stays a plain directory unless the user asks for the agent mailbox
+  convention, which writes a README, a shared skill and `memory.md` into
+  it (the convention came from real use between a Claude Code and an
+  opencode agent). It reuses `create` rather than adding a subcommand:
+  `create` is already a no-op on an existing share, so the same command
+  seeds a share created earlier. Seeding never overwrites a file, like
+  the project templates, so users edit the result freely and a rerun
+  changes nothing. The previous point still holds: agents learn about
+  the share from the user, who points them at the seeded skill. Who owns
+  the rules afterwards is not decided by the template: the README has a
+  "Rules owner" section for the user to fill in, and until then agents
+  change the rules only when the user asks.
 
 ## Commits, not pushes
 
