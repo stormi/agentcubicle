@@ -298,6 +298,8 @@ Builds the `agentcubicle` image on top of `ghcr.io/anomalyco/opencode` with a fu
 
 `setup` does not require a tool argument. It always builds the base image with dev tools. `--claude` adds Claude Code as a separate layer on top of whatever image already exists; it does not rebuild the base from scratch.
 
+`--clear` while containers from the image exist: with Docker it goes ahead and lists them. They keep running on the old image until they exit, and only containers started afterwards get the rebuilt one. With Podman it refuses and lists them, because removing the image there also removes every container using it, running sessions included. Exit the running ones, run `agentcubicle cleanup` for stopped ones, then retry.
+
 ### `check`
 
 Inspects an image (default: `agentcubicle`) for all required tools plus the claude binary. Prints ✓/✗ for each package. `claude`, `opencode` and `gh` are reported with their version, since auto-updates are off inside the container (see [Tool versions in the container](#tool-versions-in-the-container)) and the image is what pins them. A missing `opencode` is reported but not treated as a failure: it comes from the base image, and `setup` cannot install it. Use `--img IMAGE` to check an arbitrary image.

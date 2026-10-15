@@ -887,8 +887,22 @@ if [[ "$COMMAND" == "setup" ]]; then
     fi
   done
 
-  # Remove existing image first if --clear is set
+  # Remove existing image first if --clear is set. podman image rm -f also
+  # removes every container using the image, running sessions included, so
+  # refuse while any exist. Docker only untags an image that a container still
+  # uses: the container keeps the old image until it exits, so just say so.
   if $CLEAR; then
+    IN_USE="$($ENGINE ps -a --filter "ancestor=$COMMIT_TARGET" --format '{{.Names}}' 2>/dev/null || true)"
+    if [[ -n "$IN_USE" ]]; then
+      if [[ "$ENGINE" == podman ]]; then
+        echo "Error: these containers use $COMMIT_TARGET, and removing the image with podman would remove them too:" >&2
+        while IFS= read -r c; do echo "  $c"; done <<<"$IN_USE" >&2
+        echo "Exit the running ones and remove the stopped ones (agentcubicle cleanup), then run setup --clear again." >&2
+        exit 1
+      fi
+      echo "These containers keep using the current image until they exit; containers started after the rebuild use the new one:"
+      while IFS= read -r c; do echo "  $c"; done <<<"$IN_USE"
+    fi
     $ENGINE image rm -f "$COMMIT_TARGET" >/dev/null 2>/dev/null || true
   fi
 
