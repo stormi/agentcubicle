@@ -221,6 +221,29 @@ dir rather than reusing the host `/run/user/<uid>` path. Both engine paths
 (file ownership round-trip and host config forwarding) are exercised by the
 `engines` CI workflow; the clipboard path is not (runners are headless).
 
+## The tool is not PID 1
+
+Without an init, the tool ended up as the container's PID 1: the entrypoint
+shell `exec`s `su`, BusyBox `su` replaces itself with the inner shell, and
+that shell `exec`s the tool. PID 1 adopts every orphaned process in the
+container, and neither Claude Code (Node) nor opencode reaps children it did
+not spawn itself, so orphans stayed zombies until the container exited.
+Seen in practice: `xclip` (it forks to keep owning the clipboard selection),
+`git`, and `timeout` wrappers. Both run paths pass `--init`, so the engine
+puts its own init in front (tini as `docker-init`, `catatonit` under
+podman), which reaps orphans and forwards signals to the tool.
+
+Using the engine's init rather than one baked into the image avoids an image
+rebuild for existing users, at the cost of depending on the init binary
+being installed with the engine. Docker Engine and podman packages usually
+ship it; where one does not, the container fails to start with the engine's
+own error, which the README covers. The short probe containers (`check`,
+`setup`) do not need it and do not pass it.
+
+This is separate from the Ctrl+Z problem (a suspended tool has no shell to
+resume it from), which still stands: the init forwards signals but is not a
+job-control shell.
+
 ## Environment values go through the engine's environment
 
 Every value the container needs from the host (the Claude token, opencode

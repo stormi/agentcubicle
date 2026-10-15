@@ -1955,6 +1955,14 @@ if $KEEP_CONTAINER; then
   RUN_RM_ARGS=()
 fi
 
+# Both run paths below pass --init. Without it the tool is PID 1: the
+# entrypoint shell execs su, which execs the inner shell, which execs the
+# tool. PID 1 adopts every orphaned process in the container, and neither
+# Node (claude) nor opencode reaps children it did not spawn, so orphans
+# (xclip forking to keep the clipboard, detached git maintenance) stayed
+# zombies until the container exited. The engine init (tini as docker-init,
+# catatonit under podman) reaps them and forwards signals to the tool.
+
 # A value passed as -e NAME=VALUE sits on the engine command line, which every
 # account on the host can read (ps, /proc/<pid>/cmdline) for as long as the
 # container runs: the Claude token, opencode provider keys, the forwarded
@@ -2010,6 +2018,7 @@ if [[ "$ENGINE" == podman ]]; then
   )
   _run_engine ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_ARGS[@]}"} \
     --name "$CONTAINER_NAME" \
+    --init \
     --entrypoint sh \
     --userns=keep-id:uid=1000,gid=1000 \
     --security-opt label=disable \
@@ -2065,6 +2074,7 @@ RUN_ENV_ARGS=(
 )
 _run_engine ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_ARGS[@]}"} \
   --name "$CONTAINER_NAME" \
+  --init \
   --entrypoint sh \
   -w "$CONTAINER_PROJECT_DIR" \
   -v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw" \

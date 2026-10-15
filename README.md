@@ -515,6 +515,7 @@ The project name is derived from the current working directory basename, with no
     - **X11**: If `DISPLAY` is set, `/tmp/.X11-unix` is mounted and `XAUTHORITY` is forwarded if present.
     - The Podman clipboard path has not been verified on a real desktop yet; report back if it misbehaves.
 12. **Git**: `/home/user/project` is registered as a safe directory so git operations work without warnings.
+13. **Init process**: containers start with the engine's `--init`, so a small init (`docker-init`, which is tini, under Docker; `catatonit` under Podman) runs as PID 1 and the tool runs under it. It reaps processes left behind by the tool (for instance `xclip` keeping the clipboard), which would otherwise stay as zombies until the container exits. If a container fails to start with an error about `docker-init` or `catatonit` not being found, your engine install does not include it: install your distribution's package for it (`catatonit` for Podman; for Docker, the package that provides `docker-init`, often `tini`).
 
 ## Installed packages
 
