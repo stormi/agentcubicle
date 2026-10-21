@@ -525,6 +525,7 @@ REQUIRED_PACKAGES=(
   "gdb"
   "gdb-dashboard:gdb"
   "git"
+  "git-lfs"
   "htop"
   "httpie"
   "jq"
@@ -984,6 +985,7 @@ ARG PACKAGES
 ARG INSTALL_CLAUDE
 ARG USER_INSTALL_B64
 RUN apk add --no-cache $PACKAGES bash libgcc libstdc++ ripgrep shadow
+RUN git lfs install --system --skip-repo
 RUN addgroup -g 1000 user 2>/dev/null || true
 RUN adduser -u 1000 -G user -D -h /home/user user 2>/dev/null || true
 RUN mkdir -p /usr/local/bin

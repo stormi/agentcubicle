@@ -264,6 +264,19 @@ with `apk info -e`. Existing images get it only through `setup --clear`
 out); with no zone data musl treats an unknown `TZ` as UTC, so an old image
 just keeps the old behaviour.
 
+## Git LFS
+
+The image installs `git-lfs`, and the build runs `git lfs install --system
+--skip-repo`. Installing the package alone is not enough: git only runs the
+LFS filters when the `filter.lfs.*` config is set, so without it a clone in
+the container leaves pointer files. The config goes in the system file
+(`/etc/gitconfig`, root-owned in the image) rather than the user's global one,
+because the global one is rewritten per container by the startup script and
+the forwarded host config is an allowlist that does not, and need not,
+include `filter.lfs.*`. `--skip-repo` keeps the build from touching a
+repository in its working directory. As with `tzdata`, existing images get it
+only through `setup --clear`.
+
 ## Environment values go through the engine's environment
 
 Every value the container needs from the host (the Claude token, opencode
