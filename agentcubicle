@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run opencode or claude in an isolated container (Docker or rootless Podman),
 # starting in a read-only plan mode you manually escalate out of. Project files
-# are mounted read-write. The engine is auto-detected (Podman preferred when
+# are mounted read-write (read-only with --readonly). The engine is auto-detected (Podman preferred when
 # both are installed); set AGENTCUBICLE_ENGINE=docker or =podman to override.
 #
 # Usage:
@@ -13,7 +13,7 @@
 #   agentcubicle cleanup                                  # Remove stopped containers
 #   agentcubicle share <create NAME [--mailbox]|list|rm NAME>  # Manage named shares (host dirs)
 #   agentcubicle [<command>|<opencode|claude>] --help     # Help for agentcubicle itself
-#   agentcubicle <opencode|claude> [--mount MOUNT] [--share NAME[:ro|:rw]] [--share-dir PATH[:ro|:rw]] [--env ENV] [--img IMAGE] [--name NAME] [--keep-container] [--] [tool args...]
+#   agentcubicle <opencode|claude> [--mount MOUNT] [--share NAME[:ro|:rw]] [--share-dir PATH[:ro|:rw]] [--env ENV] [--img IMAGE] [--name NAME] [--keep-container] [--readonly] [--] [tool args...]
 #   agentcubicle claude [--account NAME] [...]           # Use ~/.claude/oauth-token-NAME instead of ~/.claude/oauth-token
 #
 # Examples:
@@ -31,6 +31,7 @@
 #   agentcubicle claude
 #   agentcubicle opencode --name my-session
 #   agentcubicle opencode --keep-container
+#   agentcubicle claude --readonly
 #   agentcubicle claude --account perso
 #   ANTHROPIC_API_KEY="$(cat ~/.claude-key)" agentcubicle claude --env ANTHROPIC_API_KEY
 #   agentcubicle opencode --mount /etc/ssh:/etc/ssh:ro
@@ -93,6 +94,7 @@ COMMAND=""
 TOOL=""
 CMD_NAME=""
 KEEP_CONTAINER=false
+READONLY=false
 ACCOUNT=""
 
 # Named shares: plain host directories under one fixed root, mounted into the
@@ -370,6 +372,7 @@ _print_run_help() {
   echo "  --env VAR[=VALUE]          Extra environment variable. VAR alone takes its value from your"
   echo "                             environment, which keeps secrets off the command line. Repeatable."
   echo "  --keep-container           Keep the container after $1 exits"
+  echo "  --readonly                 Mount the project read-only; only .agentcubicle/ stays writable"
   if [[ "$1" == claude ]]; then
     echo "  --account NAME             Use ~/.claude/oauth-token-NAME instead of ~/.claude/oauth-token"
   fi
@@ -839,6 +842,10 @@ if [[ -z "$COMMAND" ]]; then
         ;;
       --keep-container)
         KEEP_CONTAINER=true
+        shift
+        ;;
+      --readonly)
+        READONLY=true
         shift
         ;;
       --account)
@@ -1811,6 +1818,20 @@ if ! $HAS_EXPLICIT_PROJECT_NAME; then
   EXTRA_ENVS+=("-e" "AGENTCUBICLE_PROJECT_NAME=$(basename "$WORKDIR")")
 fi
 
+# The project mount. With --readonly the whole project is read-only except
+# .agentcubicle/ (the agent's persistent memory and Claude Code state), which
+# is bind-mounted read-write on top of it; the nested mount has to come after
+# its parent. The agent is told through the environment and the kickoff prompt.
+if $READONLY; then
+  PROJECT_MOUNT_ARGS=(
+    -v "$WORKDIR:$CONTAINER_PROJECT_DIR:ro"
+    -v "$WORKDIR/.agentcubicle:$CONTAINER_PROJECT_DIR/.agentcubicle:rw"
+  )
+  EXTRA_ENVS+=("-e" "AGENTCUBICLE_READONLY=1")
+else
+  PROJECT_MOUNT_ARGS=(-v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw")
+fi
+
 # Containers run in UTC otherwise, so dates, logs and the timestamps of commits
 # made in the container would not match the host. Forward the host zone name
 # as TZ (the image has tzdata), from TZ if the host sets one, else from where
@@ -1887,6 +1908,9 @@ CLAUDE_ENV_SETUP='export DISABLE_AUTOUPDATER=${DISABLE_AUTOUPDATER:-1}; '
 # No apostrophes/quotes in this text — it survives through the same
 # su -c reparse as everything else in INNER_CMD.
 KICKOFF_PROMPT='Without spending extra time deliberating, briefly tell me which of your local instructions and memory files you have and give a quick one paragraph summary of what is in them, then stop and wait for what is next.'
+if $READONLY; then
+  KICKOFF_PROMPT="$KICKOFF_PROMPT The project directory is mounted read-only in this session, so you cannot change any project file. Only the .agentcubicle directory is writable, which is where your memory and notes go."
+fi
 
 # Names used in the claude token bootstrap messages, and the file through
 # which the container hands a pasted token back to the host.
@@ -2075,7 +2099,7 @@ if [[ "$ENGINE" == podman ]]; then
     --userns=keep-id:uid=1000,gid=1000 \
     --security-opt label=disable \
     -w "$CONTAINER_PROJECT_DIR" \
-    -v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw" \
+    "${PROJECT_MOUNT_ARGS[@]}" \
     ${CONFIG_HOME_MOUNT_ARGS[@]+"${CONFIG_HOME_MOUNT_ARGS[@]}"} \
     ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
     "$IMAGE" \
@@ -2129,7 +2153,7 @@ _run_engine ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_A
   --init \
   --entrypoint sh \
   -w "$CONTAINER_PROJECT_DIR" \
-  -v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw" \
+  "${PROJECT_MOUNT_ARGS[@]}" \
   ${CONFIG_HOME_MOUNT_ARGS[@]+"${CONFIG_HOME_MOUNT_ARGS[@]}"} \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
   "$IMAGE" \

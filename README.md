@@ -1,6 +1,6 @@
 # agentcubicle
 
-Run opencode or claude code in an isolated container (Docker, or rootless Podman). Project files are mounted read-write; sessions start in a read-only plan mode that you manually escalate out of once you're ready to let it act.
+Run opencode or claude code in an isolated container (Docker, or rootless Podman). Project files are mounted read-write (or read-only with `--readonly`); sessions start in a read-only plan mode that you manually escalate out of once you're ready to let it act.
 
 ## Why another tool
 
@@ -18,7 +18,7 @@ I'm sharing the result in case it's useful to anyone, but I don't make any promi
 - Starts every session in a read-only plan mode you manually escalate out of (`opencode --agent plan`; Claude `--permission-mode plan`).
 - Containers are removed when the tool exits, so they don't pile up on disk. Pass `--keep-container` to keep one around (to `commit` it afterwards, say).
 - Tool auto-updates are disabled inside the container: an update cannot outlive a container that is removed on exit, and the restart it asks for cannot happen. Tool versions come from the image and are refreshed by rebuilding it.
-- Minimal mounts: project dir (rw), plus tool config read-only (`~/.config/opencode` for opencode; only `~/.claude/settings.json` for Claude, never the OAuth/credentials files).
+- Minimal mounts: project dir (rw, or ro with `--readonly` while `.agentcubicle/` stays rw), plus tool config read-only (`~/.config/opencode` for opencode; only `~/.claude/settings.json` for Claude, never the OAuth/credentials files).
 - Named shares: host directories you create once (`agentcubicle share create NAME`) and enable per container (`--share NAME` or `--share NAME:ro`), so two containers can exchange files without either seeing the other's project. `--share-dir PATH` mounts any host directory the same way for one session, read-only by default (for example, part of another agent's workspace).
 - Files you create come out owned by you on the host: under Docker via a root-phase UID/GID remap, under rootless Podman via `--userns=keep-id`.
 - Runs on Docker or rootless Podman. The engine is auto-detected (Podman preferred when both are installed); set `AGENTCUBICLE_ENGINE=docker` or `=podman` to override.
@@ -391,6 +391,7 @@ If no subcommand is given, a new container is started based on `agentcubicle` wi
 | `--share-dir D` | Mount host directory `D` at `/shares/<basename of D>` for this session, **read-only by default**; `D:rw` mounts it read-write. Repeatable. |
 | `--env E`   | Extra env var: `--env NAME=value`, or `--env NAME` to take the value from your environment (keeps it out of the process list, see below). Repeatable. |
 | `--keep-container` | Keep the container after the tool exits. Without it, the container is removed on exit. |
+| `--readonly` | Mount the project read-only. `.agentcubicle/` (the agent's persistent memory and Claude Code state) stays writable, so the agent keeps its notes but cannot change your code or commit. The agent is told through the first prompt and `AGENTCUBICLE_READONLY=1`. |
 | `--account A` | `claude` only: use the token in `~/.claude/oauth-token-A` instead of `~/.claude/oauth-token` (see [Using another Claude account](#using-another-claude-account)). |
 | `-h`, `--help` | Show agentcubicle's options for running the tool, without starting a container. For the tool's own help, use `agentcubicle claude -- --help`. |
 | `--`        | Pass remaining arguments directly to the tool                  |
