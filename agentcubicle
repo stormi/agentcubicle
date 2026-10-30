@@ -1,8 +1,9 @@
 #!/bin/bash
 # Run opencode or claude in an isolated container (Docker or rootless Podman),
 # starting in a read-only plan mode you manually escalate out of. Project files
-# are mounted read-write (read-only with --readonly). The engine is auto-detected (Podman preferred when
-# both are installed); set AGENTCUBICLE_ENGINE=docker or =podman to override.
+# are mounted read-write (read-only with --readonly). The engine is
+# auto-detected (Podman preferred when both are installed); set
+# AGENTCUBICLE_ENGINE=docker or =podman to override.
 #
 # Usage:
 #   agentcubicle setup [--clear] [--claude]               # Build base image; --claude adds Claude Code
@@ -372,7 +373,7 @@ _print_run_help() {
   echo "  --env VAR[=VALUE]          Extra environment variable. VAR alone takes its value from your"
   echo "                             environment, which keeps secrets off the command line. Repeatable."
   echo "  --keep-container           Keep the container after $1 exits"
-  echo "  --readonly                 Mount the project read-only; only .agentcubicle/ stays writable"
+  echo "  --readonly                 Mount the project read-only, except .agentcubicle/"
   if [[ "$1" == claude ]]; then
     echo "  --account NAME             Use ~/.claude/oauth-token-NAME instead of ~/.claude/oauth-token"
   fi
@@ -1911,7 +1912,7 @@ CLAUDE_ENV_SETUP='export DISABLE_AUTOUPDATER=${DISABLE_AUTOUPDATER:-1}; '
 # su -c reparse as everything else in INNER_CMD.
 KICKOFF_PROMPT='Without spending extra time deliberating, briefly tell me which of your local instructions and memory files you have and give a quick one paragraph summary of what is in them, then stop and wait for what is next.'
 if $READONLY; then
-  KICKOFF_PROMPT="$KICKOFF_PROMPT The project directory is mounted read-only in this session, so you cannot change any project file. Only the .agentcubicle directory is writable, which is where your memory and notes go."
+  KICKOFF_PROMPT="$KICKOFF_PROMPT The project directory is mounted read-only in this session, except the .agentcubicle directory, where your memory and notes go."
 fi
 
 # Names used in the claude token bootstrap messages, and the file through
@@ -1962,11 +1963,11 @@ Token received. It is saved to $CLAUDE_TOKEN_DISPLAY on the host when this conta
 EOF
   )
   CLAUDE_BOOTSTRAP_MANUAL_MSG=$(cat <<EOF
-No token pasted. To save it by hand, write it into the bind-mounted project directory so it survives this container exiting:
-  echo <paste token here> > $CONTAINER_PROJECT_DIR/.claude-oauth-token
+No token pasted. To save it by hand, write it into the bind-mounted .agentcubicle directory (writable even with --readonly) so it survives this container exiting:
+  echo <paste token here> > $CONTAINER_PROJECT_DIR/.agentcubicle/.claude-oauth-token
 
 Then exit this container (exit or Ctrl-D). On the host, run:
-  mkdir -p ~/.claude && mv .claude-oauth-token $CLAUDE_TOKEN_DISPLAY && chmod 600 $CLAUDE_TOKEN_DISPLAY
+  mkdir -p ~/.claude && mv .agentcubicle/.claude-oauth-token $CLAUDE_TOKEN_DISPLAY && chmod 600 $CLAUDE_TOKEN_DISPLAY
 
 Then start a fresh container to confirm it worked: $CLAUDE_RUN_DISPLAY
 EOF

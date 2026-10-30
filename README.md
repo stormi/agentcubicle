@@ -141,7 +141,7 @@ If none of those are found, `agentcubicle claude` detects this itself and, inste
 5. The container exits, and agentcubicle saves the token on the host to `~/.claude/oauth-token` (mode 600). The container never has write access to `~/.claude`: the token passes through a temporary file in the project's `.agentcubicle/` directory, which is moved into place and removed once the container exits.
 6. Run `agentcubicle claude` again. It starts straight into a session; from now on, plain `agentcubicle claude` picks the token up with no `--env` needed. (You can still pass `--env CLAUDE_CODE_OAUTH_TOKEN` explicitly, with the token exported in your shell, to override it for one run.)
 
-If you press Enter without pasting anything, the bootstrap prints the manual steps instead and leaves you in a shell to do them: write the token into the bind-mounted project directory (`echo "<token>" > /home/user/project/.claude-oauth-token`), exit, then on the host `mkdir -p ~/.claude && mv .claude-oauth-token ~/.claude/oauth-token && chmod 600 ~/.claude/oauth-token`.
+If you press Enter without pasting anything, the bootstrap prints the manual steps instead and leaves you in a shell to do them: write the token into the bind-mounted project directory (`echo "<token>" > /home/user/project/.agentcubicle/.claude-oauth-token`), exit, then on the host `mkdir -p ~/.claude && mv .agentcubicle/.claude-oauth-token ~/.claude/oauth-token && chmod 600 ~/.claude/oauth-token`.
 
 To replace a token (expired, revoked, or for a different account), delete the file and run `agentcubicle claude` again.
 
@@ -391,7 +391,7 @@ If no subcommand is given, a new container is started based on `agentcubicle` wi
 | `--share-dir D` | Mount host directory `D` at `/shares/<basename of D>` for this session, **read-only by default**; `D:rw` mounts it read-write. Repeatable. |
 | `--env E`   | Extra env var: `--env NAME=value`, or `--env NAME` to take the value from your environment (keeps it out of the process list, see below). Repeatable. |
 | `--keep-container` | Keep the container after the tool exits. Without it, the container is removed on exit. |
-| `--readonly` | Mount the project read-only. `.agentcubicle/` (the agent's persistent memory and Claude Code state) stays writable, so the agent keeps its notes but cannot change your code or commit. The agent is told through the first prompt and `AGENTCUBICLE_READONLY=1`. |
+| `--readonly` | Mount the project read-only, except `.agentcubicle/` (the agent's persistent memory and Claude Code state), which stays writable. The agent can therefore still edit its local rules, memory and `claude-home/settings.json` (hooks included), and those edits apply to later read-write sessions too. Mounts from `--share`, `--share-dir` and `--mount` keep their own mode. The agent is told through the first prompt and `AGENTCUBICLE_READONLY=1`. |
 | `--account A` | `claude` only: use the token in `~/.claude/oauth-token-A` instead of `~/.claude/oauth-token` (see [Using another Claude account](#using-another-claude-account)). |
 | `-h`, `--help` | Show agentcubicle's options for running the tool, without starting a container. For the tool's own help, use `agentcubicle claude -- --help`. |
 | `--`        | Pass remaining arguments directly to the tool                  |

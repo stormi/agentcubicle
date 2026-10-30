@@ -659,6 +659,25 @@ decided to keep it before starting. Committing a still-running container
 from a second terminal, the interactive `commit` path, is unaffected,
 and that is the usual way it is done.
 
+## Read-only project mount (`--readonly`)
+
+`--readonly` mounts the project `:ro` and bind-mounts `.agentcubicle/`
+`:rw` on top of it. The nested mount has to be listed after its parent,
+or the parent would hide it. `.agentcubicle/` stays writable because the
+session cannot work without it: Claude Code keeps all of its state there
+(`CLAUDE_CONFIG_DIR` is `claude-home/`, including the plan files plan
+mode writes), the root phase seeds `settings.json` and `.claude.json`
+into it on every start, the token bootstrap hands its token over through
+it, and the agent's memory file is the one thing a thinking or review
+session is still expected to update.
+
+The mode limits writes to project files; it does not isolate the agent's
+own configuration. The local rule files, memory and
+`claude-home/settings.json` (hooks included) stay editable and apply to
+later read-write sessions as well, which the README states. Other mounts
+(`--share`, `--share-dir`, `--mount`) keep the mode they were given, so
+the kickoff prompt only claims the project directory is read-only.
+
 ## Tool auto-updates are disabled in the container
 
 Both tools update themselves in the background. In a container that is
