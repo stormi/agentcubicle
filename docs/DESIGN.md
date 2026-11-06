@@ -277,6 +277,30 @@ include `filter.lfs.*`. `--skip-repo` keeps the build from touching a
 repository in its working directory. As with `tzdata`, existing images get it
 only through `setup --clear`.
 
+## Terminal type and color depth
+
+Both engines set `TERM=xterm` when given `-t` and leave `COLORTERM` unset.
+Node tools read their color depth from those two (Claude Code uses
+supports-color through chalk: `xterm` alone is 16 colors, `xterm-256color` is
+256, `COLORTERM=truecolor` is 24-bit), so Claude Code in a container drew its
+orange as red and its syntax highlighting mostly in the default foreground and
+gray. The host values are now forwarded. They are read with `printenv`, not
+`$TERM`, because bash sets an unexported `TERM=dumb` when the environment has
+none, which would have sent `dumb` to headless runs. `COLORTERM` is forwarded
+only when the host sets it, rather than defaulted to `truecolor`, so a
+terminal without true color is not told it has it.
+
+Forwarding `TERM` as is breaks curses programs when the image has no terminfo
+entry for it: the opencode base image only had `ncurses-terminfo-base`, which
+lacks `xterm-kitty`, `foot`, `wezterm` and others. The image now installs the
+full `ncurses-terminfo` (about 2 MiB), and `TERM_SETUP`, which runs first in
+the tool command, replaces a `TERM` with no entry in `/usr/share/terminfo` or
+`/etc/terminfo` by `xterm-256color`. That covers images built before the
+package was added (they only get it through `setup --clear`, as with
+`tzdata`) and terminals newer than the image's database. Mounting the host's
+terminfo database was not chosen: its location varies between hosts and
+macOS, and a user's own `~/.terminfo` entries would still be missing.
+
 ## Environment values go through the engine's environment
 
 Every value the container needs from the host (the Claude token, opencode

@@ -537,6 +537,7 @@ REQUIRED_PACKAGES=(
   "luajit"
   "lsof"
   "nano"
+  "ncurses-terminfo:"
   "netcat-openbsd:nc"
   "nmap"
   "nodejs:node"
@@ -1867,6 +1868,25 @@ if [[ -n "$HOST_TZ" ]] && ! $HAS_EXPLICIT_TZ; then
   EXTRA_ENVS+=("-e" "TZ=$HOST_TZ")
 fi
 
+# Without these the container gets the engine default TERM=xterm and no
+# COLORTERM, and Node tools (Claude Code, through chalk) drop to 16 colors:
+# syntax highlighting turns mostly white and gray. Forward the host values as
+# they are. COLORTERM is only forwarded when the host sets it, so a terminal
+# without true color is not told it has it. A TERM the image has no terminfo
+# entry for is replaced in the container (TERM_SETUP below). --env TERM=...
+# or --env COLORTERM=... overrides either one. printenv, because bash sets an
+# unexported TERM=dumb when the environment has none.
+for term_var in TERM COLORTERM; do
+  term_val="$(printenv "$term_var" || true)"
+  [[ "$term_val" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || continue
+  for env_entry in "${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}"; do
+    if [[ "$env_entry" == "$term_var" || "$env_entry" == "$term_var="* ]]; then
+      continue 2
+    fi
+  done
+  EXTRA_ENVS+=("-e" "$term_var=$term_val")
+done
+
 if [[ -n "$HOST_GITCONFIG_B64" ]]; then
   EXTRA_ENVS+=("-e" "HOST_GITCONFIG_B64=$HOST_GITCONFIG_B64")
 fi
@@ -1901,6 +1921,13 @@ GIT_SETUP='if [ -n "$HOST_GITCONFIG_B64" ]; then printf %s "$HOST_GITCONFIG_B64"
 # DISABLE_AUTOUPDATER=0 still wins on both engine paths.
 CLAUDE_ENV_SETUP='export DISABLE_AUTOUPDATER=${DISABLE_AUTOUPDATER:-1}; '
 
+# The forwarded host TERM can name a terminal the image has no terminfo entry
+# for (a terminal newer than the image, or an image built before
+# ncurses-terminfo was added). Curses programs (htop, nano, less, tmux) then
+# fail to start, so fall back to xterm-256color, which every terminal in
+# common use handles.
+TERM_SETUP='if [ -n "$TERM" ]; then _ac_t=$(printf %.1s "$TERM"); if [ ! -f "/usr/share/terminfo/$_ac_t/$TERM" ] && [ ! -f "/etc/terminfo/$_ac_t/$TERM" ]; then export TERM=xterm-256color; fi; fi; '
+
 # Sent as the tool's first turn so the "announce what you read" instruction
 # in AGENTS.local.md/CLAUDE.local.md actually has a chance to fire: an interactive TUI
 # never gives the model an unprompted turn, so without this the loaded
@@ -1933,9 +1960,9 @@ if [[ -n "$CLAUDE_ADD_DIRS" ]]; then
 fi
 
 if [[ "$TOOL" == "opencode" ]]; then
-  INNER_CMD="$GIT_SETUP export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; exec opencode --agent plan --prompt '$KICKOFF_PROMPT' \"\$@\""
+  INNER_CMD="$TERM_SETUP$GIT_SETUP export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; exec opencode --agent plan --prompt '$KICKOFF_PROMPT' \"\$@\""
 elif $CLAUDE_HAS_CREDENTIALS; then
-  INNER_CMD="$GIT_SETUP$CLAUDE_ENV_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; exec claude $CLAUDE_ADD_DIR_ARGS--permission-mode plan \"\$@\" '$KICKOFF_PROMPT'"
+  INNER_CMD="$TERM_SETUP$GIT_SETUP$CLAUDE_ENV_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; exec claude $CLAUDE_ADD_DIR_ARGS--permission-mode plan \"\$@\" '$KICKOFF_PROMPT'"
 else
   # No credentials detected on the host. Instead of starting a normal
   # session (which would just hit a login wall), run `claude setup-token`
@@ -1972,7 +1999,7 @@ Then exit this container (exit or Ctrl-D). On the host, run:
 Then start a fresh container to confirm it worked: $CLAUDE_RUN_DISPLAY
 EOF
   )
-  INNER_CMD="$GIT_SETUP$CLAUDE_ENV_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; echo '$CLAUDE_BOOTSTRAP_INTRO_MSG'; if ! claude setup-token; then echo 'Token setup did not finish. Run $CLAUDE_RUN_DISPLAY again to retry.'; exec sh; fi; echo '$CLAUDE_BOOTSTRAP_PASTE_MSG'; stty -echo 2>/dev/null; read -r tok; stty echo 2>/dev/null; echo; if [ -n \"\$tok\" ] && (umask 077; printf %s \"\$tok\" > $CLAUDE_TOKEN_PENDING_IN_CONTAINER); then echo '$CLAUDE_BOOTSTRAP_DONE_MSG'; else echo '$CLAUDE_BOOTSTRAP_MANUAL_MSG'; exec sh; fi"
+  INNER_CMD="$TERM_SETUP$GIT_SETUP$CLAUDE_ENV_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; echo '$CLAUDE_BOOTSTRAP_INTRO_MSG'; if ! claude setup-token; then echo 'Token setup did not finish. Run $CLAUDE_RUN_DISPLAY again to retry.'; exec sh; fi; echo '$CLAUDE_BOOTSTRAP_PASTE_MSG'; stty -echo 2>/dev/null; read -r tok; stty echo 2>/dev/null; echo; if [ -n \"\$tok\" ] && (umask 077; printf %s \"\$tok\" > $CLAUDE_TOKEN_PENDING_IN_CONTAINER); then echo '$CLAUDE_BOOTSTRAP_DONE_MSG'; else echo '$CLAUDE_BOOTSTRAP_MANUAL_MSG'; exec sh; fi"
 fi
 
 # Test hook: when AGENTCUBICLE_TEST_CMD is set, replace the interactive tool
