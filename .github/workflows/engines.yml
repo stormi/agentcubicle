@@ -186,6 +186,29 @@ jobs:
           cat settings-probe.json
           test "$(jq -r .statusLine settings-probe.json)" = "null"
 
+      # Nested containers: rootless podman inside the agent container. The
+      # image pulled by the first run has to still be in the per-project
+      # volume on the second. On docker, also check that nested podman does
+      # not work without the flag (no /dev/fuse, default seccomp profile).
+      - name: Assert nested containers
+        run: |
+          set -euxo pipefail
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true
+          rm -f nested.txt nested2.txt nested3.txt
+          AGENTCUBICLE_TEST_CMD='podman run --rm docker.io/library/alpine:3.20 echo nested-ok > /home/user/project/nested.txt' \
+            ./agentcubicle opencode --nested-containers
+          grep -qx nested-ok nested.txt
+          test "$(stat -c %U nested.txt)" = "$(id -un)"
+          AGENTCUBICLE_TEST_CMD='podman image exists docker.io/library/alpine:3.20 && echo kept > /home/user/project/nested2.txt' \
+            ./agentcubicle opencode --nested-containers
+          grep -qx kept nested2.txt
+          if [ "$AGENTCUBICLE_ENGINE" = docker ]; then
+            AGENTCUBICLE_TEST_CMD='podman run --rm docker.io/library/alpine:3.20 true && echo ran > /home/user/project/nested3.txt' \
+              ./agentcubicle opencode || true
+            test ! -e nested3.txt
+          fi
+
       # Running as root cannot work (the UID remap collides with the container
       # root account and config would be read from /root), so it is refused up
       # front. Host-side and engine-independent, but run on both legs anyway.

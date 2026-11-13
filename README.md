@@ -413,6 +413,8 @@ If no subcommand is given, a new container is started based on `agentcubicle` wi
 | `--env E`   | Extra env var: `--env NAME=value`, or `--env NAME` to take the value from your environment (keeps it out of the process list, see below). Repeatable. |
 | `--keep-container` | Keep the container after the tool exits. Without it, the container is removed on exit. |
 | `--readonly` | Mount the project read-only, except `.agentcubicle/` (the agent's persistent memory and Claude Code state), which stays writable. The agent can therefore still edit its local rules, memory and `claude-home/settings.json` (hooks included), and those edits apply to later read-write sessions too. Mounts from `--share`, `--share-dir` and `--mount` keep their own mode. The agent is told through the first prompt and `AGENTCUBICLE_READONLY=1`. |
+| `--nested-containers` | Let the agent run containers with rootless podman inside its own container. Off by default because it loosens the sandbox; see [Nested containers](#nested-containers). |
+| `--no-nested-containers` | Turn nested containers off for this run, even if the project is listed in `~/.config/agentcubicle/nested-containers`. |
 | `--account A` | `claude` only: use the token in `~/.claude/oauth-token-A` instead of `~/.claude/oauth-token` (see [Using another Claude account](#using-another-claude-account)). |
 | `-h`, `--help` | Show agentcubicle's options for running the tool, without starting a container. For the tool's own help, use `agentcubicle claude -- --help`. |
 | `--`        | Pass remaining arguments directly to the tool                  |
@@ -480,6 +482,42 @@ Each agent's id is its project name (`$AGENTCUBICLE_PROJECT_NAME`). Start every 
 Who owns the rules (you, or one agent) is left for you to decide and record in the share's `README.md`. Until then, the seeded rules tell agents to change the rules only when you ask.
 
 What it is not: agents act only when you ask them to, so you carry every exchange from one agent to the next. Nothing notifies an agent that a message arrived, and nothing enforces the rules beyond the agents following them: the only access control is `:ro` per container, as for any share. A message from another agent is treated by the seeded rules as a request from a peer, not as an instruction from you.
+
+### Nested containers
+
+Some build tools start containers themselves (`xcp-ng-dev container build`, for example, runs `docker run` or `podman run`). Giving the agent the host's engine socket would let it start a container that mounts anything on the host, so agentcubicle offers a podman of its own inside the agent's container instead. The containers the agent starts that way run inside its container's user namespace and see what the agent already sees, plus the images they pull.
+
+It is off by default. Turn it on for one run:
+
+```sh
+agentcubicle claude --nested-containers
+```
+
+or for every run in a project, by listing the project's path in `~/.config/agentcubicle/nested-containers` (one path per line, `~` allowed, `#` starts a comment):
+
+```
+# ~/.config/agentcubicle/nested-containers
+~/src/xcp-ng-rpms
+```
+
+A run turned on by that file says so on startup, and `--no-nested-containers` turns it off for one run. The file is on the host and never mounted into a container, so an agent cannot turn the option on for itself; a setting under `.agentcubicle/` could not offer that, since the agent can write there.
+
+What it changes, for that run only:
+
+- Both engines: the container gets `/dev/fuse` (for `fuse-overlayfs`), and the agent can create user namespaces and mount filesystems inside them, which exposes more of the kernel to it.
+- Docker: the container runs without a seccomp filter (`seccomp=unconfined`), because docker's default profile refuses the calls rootless podman makes. On a host with AppArmor, also without an AppArmor profile (`apparmor=unconfined`). This is the larger change of the two engines.
+- Podman: nothing beyond `/dev/fuse`. Podman's own defaults already allow user namespaces, so under podman this option is less of a gate than under docker.
+
+Images the agent pulls are kept in an engine volume per project (`agentcubicle-containers-<project>-<hash>`), so they survive across sessions. `agentcubicle cleanup` leaves volumes alone; list and remove them with the engine:
+
+```sh
+docker volume ls --filter name=agentcubicle-containers-
+docker volume rm agentcubicle-containers-myproject-1a2b3c4d
+```
+
+The agent is told through the first prompt and `AGENTCUBICLE_NESTED_CONTAINERS=1`. A tool that picks docker when it finds no setting can be pointed at podman with `--env`, for `xcp-ng-dev`: `--env XCPNG_OCI_RUNNER=podman`. An image built before podman was added does not get it from a plain `setup`: run `agentcubicle setup --clear` (add `--claude` if you use claude).
+
+Not tested yet: tools that need more than rootless podman, such as `mock`.
 
 ### Container lifetime
 
@@ -557,6 +595,7 @@ The following packages are installed in the `agentcubicle` image:
 | **CLI tools**| `bat`, `diffutils`, `file`, `fzf`, `jq`, `lsof`, `patch`, `perl`, `sqlite`, `shellcheck`, `tree`                                                              |
 | **Network**  | `curl`, `curlie`, `httpie`, `nmap`, `netcat-openbsd`, `tcpdump`, `wrk`                                                                                         |
 | **Languages**| `lua5.4`, `luajit`, `nodejs`, `python3`, `py3-pip`, `uv`                                                                                                       |
+| **Containers**| `podman`, `crun`, `fuse-overlayfs`, `passt`, `shadow-uidmap` (used with `--nested-containers`) |
 | **System**   | `htop`, `tmux`, `bash`, `tzdata`, `ncurses-terminfo`                                                                                                           |
 | **Clipboard**| `wl-clipboard`, `xclip`                                                                                                                                        |
 | **AI tools** | `opencode` (from base image), `claude` (optional, installed via `setup --claude`)                                                                              |

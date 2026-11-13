@@ -34,6 +34,7 @@
 #   agentcubicle opencode --name my-session
 #   agentcubicle opencode --keep-container
 #   agentcubicle claude --readonly
+#   agentcubicle claude --nested-containers               # Let the agent run rootless podman
 #   agentcubicle claude --account perso
 #   ANTHROPIC_API_KEY="$(cat ~/.claude-key)" agentcubicle claude --env ANTHROPIC_API_KEY
 #   agentcubicle opencode --mount /etc/ssh:/etc/ssh:ro
@@ -104,6 +105,9 @@ TOOL=""
 CMD_NAME=""
 KEEP_CONTAINER=false
 READONLY=false
+# Nested containers: empty until --nested-containers / --no-nested-containers or
+# the host-side config file decides.
+NESTED=""
 ACCOUNT=""
 
 # Named shares: plain host directories under one fixed root, mounted into the
@@ -383,6 +387,10 @@ _print_run_help() {
   echo "                             environment, which keeps secrets off the command line. Repeatable."
   echo "  --keep-container           Keep the container after $1 exits"
   echo "  --readonly                 Mount the project read-only, except .agentcubicle/"
+  echo "  --nested-containers        Let the agent run containers with rootless podman. Loosens the"
+  echo "                             container sandbox; see README, \"Nested containers\"."
+  echo "  --no-nested-containers     Turn nested containers off for this run, even if the project is"
+  echo "                             listed in ~/.config/agentcubicle/nested-containers"
   if [[ "$1" == claude ]]; then
     echo "  --account NAME             Use ~/.claude/oauth-token-NAME instead of ~/.claude/oauth-token"
   fi
@@ -587,10 +595,12 @@ REQUIRED_PACKAGES=(
   "bat"
   "build-base:make"
   "cgdb"
+  "crun"
   "curl"
   "curlie"
   "diffutils:diff"
   "file"
+  "fuse-overlayfs"
   "fzf"
   "gcc"
   "g++"
@@ -610,10 +620,13 @@ REQUIRED_PACKAGES=(
   "nmap"
   "nodejs:node"
   "npm"
+  "passt"
   "patch"
   "perl"
+  "podman"
   "python3"
   "py3-pip:pip3"
+  "shadow-uidmap:newuidmap"
   "shellcheck"
   "sqlite"
   "strace"
@@ -918,6 +931,14 @@ if [[ -z "$COMMAND" ]]; then
         READONLY=true
         shift
         ;;
+      --nested-containers)
+        NESTED=true
+        shift
+        ;;
+      --no-nested-containers)
+        NESTED=false
+        shift
+        ;;
       --account)
         if [[ $# -lt 2 || -z "$2" ]]; then
           echo "Error: --account needs a NAME." >&2
@@ -1064,6 +1085,10 @@ RUN apk add --no-cache $PACKAGES bash libgcc libstdc++ ripgrep shadow
 RUN git lfs install --system --skip-repo
 RUN addgroup -g 1000 user 2>/dev/null || true
 RUN adduser -u 1000 -G user -D -h /home/user user 2>/dev/null || true
+RUN printf '%s\n' user:1:999 user:1001:64535 > /etc/subuid && cp /etc/subuid /etc/subgid
+RUN printf '%s\n' '[containers]' 'netns = "host"' 'userns = "host"' 'ipcns = "host"' 'utsns = "host"' 'cgroupns = "host"' 'cgroups = "disabled"' 'log_driver = "k8s-file"' 'volumes = ["/proc:/proc"]' 'default_sysctls = []' '[engine]' 'cgroup_manager = "cgroupfs"' 'events_logger = "file"' 'runtime = "crun"' > /etc/containers/containers.conf
+RUN printf '%s\n' '[storage]' 'driver = "overlay"' 'runroot = "/run/containers/storage"' 'graphroot = "/var/lib/containers/storage"' 'rootless_storage_path = "/var/lib/agentcubicle/containers/storage"' '[storage.options.overlay]' 'mount_program = "/usr/bin/fuse-overlayfs"' 'mountopt = "nodev"' > /etc/containers/storage.conf
+RUN mkdir -p /var/lib/agentcubicle/containers && chown 1000:1000 /var/lib/agentcubicle/containers
 RUN mkdir -p /usr/local/bin
 ENV PATH="/usr/local/bin:$PATH"
 ENV USE_BUILTIN_RIPGREP=0
@@ -1903,6 +1928,62 @@ else
   PROJECT_MOUNT_ARGS=(-v "$WORKDIR:$CONTAINER_PROJECT_DIR:rw")
 fi
 
+# Nested containers: rootless podman inside this container, so the agent can
+# run container-based build tools without access to the host engine. Off by
+# default, since it loosens the sandbox (/dev/fuse, and under docker no seccomp
+# filter, nor AppArmor where the host has it). Turned on by --nested-containers,
+# or by listing the project in a host-side file the container never sees: a
+# setting under .agentcubicle/ could be written by the agent itself.
+# Nested images live in an engine volume per project, mounted outside
+# /home/user so the docker root phase does not chown them. See docs/DESIGN.md,
+# "Nested containers".
+NESTED_CONFIG_FILE="$USER_CONFIG_DIR/nested-containers"
+NESTED_STORAGE_DIR="/var/lib/agentcubicle/containers"
+
+# True when the current directory is listed in NESTED_CONFIG_FILE: one project
+# path per line, ~ allowed, blank lines and anything after a # ignored.
+_nested_listed() {
+  local line here
+  [[ -f "$NESTED_CONFIG_FILE" ]] || return 1
+  here="$(pwd -P)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      \~|\~/*) line="$HOME${line:1}" ;;
+    esac
+    [[ -d "$line" ]] || continue
+    [[ "$(cd "$line" && pwd -P)" == "$here" ]] && return 0
+  done < "$NESTED_CONFIG_FILE"
+  return 1
+}
+
+if [[ -z "$NESTED" ]]; then
+  NESTED=false
+  if _nested_listed; then
+    NESTED=true
+    echo "agentcubicle: nested containers are on for this project ($NESTED_CONFIG_FILE); --no-nested-containers turns them off for one run." >&2
+  fi
+fi
+
+NESTED_ARGS=()
+if $NESTED; then
+  NESTED_PROJECT="$(pwd -P)"
+  NESTED_VOLUME="agentcubicle-containers-$(basename "$NESTED_PROJECT" | sed 's/[^a-zA-Z0-9_.-]/-/g')-$(printf %s "$NESTED_PROJECT" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-8)"
+  NESTED_ARGS=(--device /dev/fuse -v "$NESTED_VOLUME:$NESTED_STORAGE_DIR")
+  if [[ "$ENGINE" == docker ]]; then
+    # Docker's default seccomp profile refuses the namespace and mount calls
+    # rootless podman makes, and so does its AppArmor profile.
+    NESTED_ARGS+=(--security-opt seccomp=unconfined)
+    if [[ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" == Y ]]; then
+      NESTED_ARGS+=(--security-opt apparmor=unconfined)
+    fi
+  fi
+  EXTRA_ENVS+=("-e" "AGENTCUBICLE_NESTED_CONTAINERS=1")
+fi
+
 # Containers run in UTC otherwise, so dates, logs and the timestamps of commits
 # made in the container would not match the host. Forward the host zone name
 # as TZ (the image has tzdata), from TZ if the host sets one, else from where
@@ -2007,6 +2088,9 @@ TERM_SETUP='if [ -n "$TERM" ]; then _ac_t=$(printf %.1s "$TERM"); if [ ! -f "/us
 KICKOFF_PROMPT='Without spending extra time deliberating, briefly tell me which of your local instructions and memory files you have and give a quick one paragraph summary of what is in them, then stop and wait for what is next.'
 if $READONLY; then
   KICKOFF_PROMPT="$KICKOFF_PROMPT The project directory is mounted read-only in this session, except the .agentcubicle directory, where your memory and notes go."
+fi
+if $NESTED; then
+  KICKOFF_PROMPT="$KICKOFF_PROMPT Rootless podman is available in this session to run containers; the images it pulls are kept per project across sessions."
 fi
 
 # Names used in the claude token bootstrap messages, and the file through
@@ -2197,6 +2281,7 @@ if [[ "$ENGINE" == podman ]]; then
     --security-opt label=disable \
     -w "$CONTAINER_PROJECT_DIR" \
     "${PROJECT_MOUNT_ARGS[@]}" \
+    ${NESTED_ARGS[@]+"${NESTED_ARGS[@]}"} \
     ${CONFIG_HOME_MOUNT_ARGS[@]+"${CONFIG_HOME_MOUNT_ARGS[@]}"} \
     ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
     "$IMAGE" \
@@ -2251,6 +2336,7 @@ _run_engine ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_A
   --entrypoint sh \
   -w "$CONTAINER_PROJECT_DIR" \
   "${PROJECT_MOUNT_ARGS[@]}" \
+  ${NESTED_ARGS[@]+"${NESTED_ARGS[@]}"} \
   ${CONFIG_HOME_MOUNT_ARGS[@]+"${CONFIG_HOME_MOUNT_ARGS[@]}"} \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
   "$IMAGE" \
@@ -2317,6 +2403,18 @@ _run_engine ${RUN_TTY_ARGS[@]+"${RUN_TTY_ARGS[@]}"} ${RUN_RM_ARGS[@]+"${RUN_RM_A
    # UID/GID on disk, so recursing into them would only waste time and
    # needlessly touch every inode of the actual project tree.
    find /home/user -mindepth 1 -maxdepth 1 ! -name project ! -name .Xauthority -exec chown -R $HOST_UID:$HOST_GID {} +
+   # Nested containers: user now has the host UID/GID, which could fall inside
+   # the subordinate range baked into the image, so move the range above both.
+   # The storage volume gets the top directory chowned only: what is inside
+   # belongs to UIDs of that range.
+   if [ -n "$AGENTCUBICLE_NESTED_CONTAINERS" ]; then
+     SUBID_START=100000
+     [ "$HOST_UID" -lt "$SUBID_START" ] || SUBID_START=$((HOST_UID + 1))
+     [ "$HOST_GID" -lt "$SUBID_START" ] || SUBID_START=$((HOST_GID + 1))
+     echo "user:$SUBID_START:65536" > /etc/subuid
+     echo "user:$SUBID_START:65536" > /etc/subgid
+     chown $HOST_UID:$HOST_GID /var/lib/agentcubicle/containers
+   fi
     export HOME=/home/user
     CMD=$(echo "$INNER_B64" | base64 -d)
     # su is BusyBox on musl, whose option parser keeps going after the user
