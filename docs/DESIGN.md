@@ -895,3 +895,63 @@ The lookup must not slow startup or get in the way:
   `AGENTCUBICLE_NO_UPDATE_CHECK=1` turns it off.
 - Versions are compared numerically, field by field, in bash, rather than
   with `sort -V`, which not every `sort` has.
+
+## Nested containers
+
+Build tools such as `xcp-ng-dev container` start containers themselves. Three
+ways to let the agent run them were weighed:
+
+- The host engine socket, mounted into the container. Rejected: whoever talks
+  to it can start a container that mounts `/` or `$HOME`, which ends the
+  sandbox.
+- A broker on the host, reading requests from a share and running a fixed
+  command shape. It needs a daemon on the host, still runs the agent's build
+  code on the host engine, and rules out interactive debugging. Kept as a
+  fallback for what nested podman cannot do (`mock` is the open question).
+- Rootless podman inside the agent's container, the option implemented. What
+  it starts runs in that container's user namespace, so it reaches nothing the
+  agent cannot already reach.
+
+It loosens the outer container, so it is off unless asked for:
+`--nested-containers` for a run, or the project's path in
+`~/.config/agentcubicle/nested-containers` for every run. That file is
+host-side config like `packages`: anything under `.agentcubicle/` is writable
+by the agent, which could then grant itself the option. A run turned on by the
+file says so, and `--no-nested-containers` overrides it.
+
+What the outer container gets:
+
+- Both engines: `--device /dev/fuse`. The host kernel may predate rootless
+  overlay mounts (5.13), so storage uses `fuse-overlayfs`.
+- Docker: `seccomp=unconfined`, since its default profile refuses `unshare`
+  and `mount` without `CAP_SYS_ADMIN`; `apparmor=unconfined` only when the host
+  has AppArmor enabled (`/sys/module/apparmor/parameters/enabled`). A narrower
+  seccomp profile (docker's default plus the needed calls) is a possible
+  follow-up once the CI test passes with this one.
+- Podman: nothing more. `label=disable` is already there, and podman's
+  default seccomp profile allows user namespaces, which also means the option
+  is less of a gate under podman than under docker.
+
+Inside, the image carries the configuration the upstream `podman/stable`
+image uses for podman in a container: namespaces shared with the agent's
+container (`netns`, `ipcns`, `utsns`, `cgroupns` = host), cgroups disabled,
+`/proc` bind-mounted rather than mounted fresh (a fresh proc mount is refused
+under the masked paths of the outer container), file-based logs and events.
+
+Subordinate IDs differ by engine. Under rootless podman the outer container
+only has the 65536 IDs of the host user's range, with `user` mapped to 1000,
+so the image ships `user:1:999` and `user:1001:64535`. Under docker the
+container has the whole ID space, but `user` is renumbered to the host UID at
+startup, which could land inside that range, so the root phase rewrites both
+files to a 65536-wide range starting at 100000, or above the host UID/GID when
+those are higher.
+
+Nested images are stored in an engine volume per project, at
+`/var/lib/agentcubicle/containers` (`rootless_storage_path`). One volume per
+project keeps one project's agent from changing images another project's
+agent runs. The mount point is outside `/home/user` on purpose: the docker
+root phase chowns `/home/user` recursively to the host user, which would
+reassign files that belong to the subordinate range. Only the volume's top
+directory is chowned there, and the image creates it owned by UID 1000 so a
+new volume starts with that owner under podman.
+
