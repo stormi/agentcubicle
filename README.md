@@ -283,6 +283,27 @@ rebuilds the image *without* Claude Code, and you would need a second `setup --c
 put it back. `opencode` comes from the base image, so it is refreshed by the same rebuild
 pulling a newer base.
 
+## agentcubicle versions and the update check
+
+`agentcubicle --version` prints the version of the script. Releases are listed at
+<https://github.com/stormi/agentcubicle/releases>, each with the script attached.
+
+When you start a tool or run `setup` from a terminal, agentcubicle looks up the latest
+release on GitHub at most once a day and, if it is newer than the script you ran, prints:
+
+```
+agentcubicle: version 0.2.0 is available (this is 0.1.0): https://github.com/stormi/agentcubicle/releases
+```
+
+The lookup is one `curl` request to `api.github.com` that runs in the background, so
+startup does not wait for it: a new release is reported on the run after the one that found
+it. Its result is kept in `~/.config/agentcubicle/update-check` (the time of the last
+lookup and the latest version seen). Nothing is printed when stderr is not a terminal, when
+`AGENTCUBICLE_TEST_CMD` is set, when `curl` is missing, or when the lookup fails; a failed
+lookup is retried the next day. Set `AGENTCUBICLE_NO_UPDATE_CHECK=1` to turn it off.
+
+A script newer than the latest release (a clone with unreleased commits) reports nothing.
+
 ## Subcommands
 
 `agentcubicle --help` lists the commands, and every subcommand accepts `-h`/`--help` to print its usage. Help works without a container engine installed.

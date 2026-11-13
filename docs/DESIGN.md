@@ -861,3 +861,37 @@ origin" follow-up suggestion after a commit). This reaches both tools,
 not just Claude Code, since it lives in the shared `AGENTS.local.md` rather
 than the Claude-specific file. Like any model instruction, this is a
 strong nudge, not a hard guarantee.
+
+## Update check
+
+The script carries its version (`AGENTCUBICLE_VERSION`) and compares it to
+the latest GitHub release. Two other ways were considered and dropped:
+
+- Comparing the clone's `HEAD` to the upstream `main` (`git ls-remote`,
+  then an ancestry check). It gives a real "newer", but only works when the
+  script runs from a git clone, and users may one day install the script
+  on its own.
+- For a script copied on its own, comparing its git blob hash to the one
+  of the file on `main`. That only tells "different", not "older": a local
+  edit triggers it too, and so does a clone ahead of `main`.
+
+A version number works the same for both install modes and gives an
+ordering, at the cost of a release step. Releases come from a workflow on
+tag push, which refuses a tag that does not match the script's version, so
+the two cannot drift apart.
+
+The lookup must not slow startup or get in the way:
+
+- It runs detached in the background and only writes a cache file
+  (`~/.config/agentcubicle/update-check`: epoch of the last attempt, latest
+  version seen). Startup reads that file and prints the notice from it, so a
+  new release is reported one run late, never with a network wait.
+- At most one attempt a day. A failed attempt updates the timestamp and
+  keeps the version seen before, so an offline host does not retry on
+  every run and a known newer release keeps being reported.
+- Only for `opencode`, `claude` and `setup`, and only when stderr is a
+  terminal and `AGENTCUBICLE_TEST_CMD` is unset, so CI and scripted runs
+  stay quiet and their engine calls stay the same.
+  `AGENTCUBICLE_NO_UPDATE_CHECK=1` turns it off.
+- Versions are compared numerically, field by field, in bash, rather than
+  with `sort -V`, which not every `sort` has.

@@ -99,6 +99,21 @@ Two traps specific to this project:
 In the PR, say what you could not test, for example "only checked with a
 fake engine" or "not tried on Wayland". I'd rather know than assume.
 
+## Releasing
+
+Versions follow SemVer, still in `0.x`. To release:
+
+1. Bump `AGENTCUBICLE_VERSION` near the top of `agentcubicle` in its own
+   commit (`Release 0.2.0`), on `main`.
+2. Tag that commit `v0.2.0` and push the tag along with `main`.
+
+`.github/workflows/release.yml` then creates the GitHub release, with
+generated notes and the script attached. It fails without releasing if the
+tag is not `vX.Y.Z` or does not match `AGENTCUBICLE_VERSION`. Installed
+scripts compare their own version to the latest release (see README,
+"agentcubicle versions and the update check"), so a release is what tells
+users there is something new; commits on `main` alone do not.
+
 ## Changing the seeded templates
 
 On the first run in a project, agentcubicle writes starter rule files into

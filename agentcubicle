@@ -14,6 +14,7 @@
 #   agentcubicle cleanup                                  # Remove stopped containers
 #   agentcubicle share <create NAME [--mailbox]|list|rm NAME>  # Manage named shares (host dirs)
 #   agentcubicle [<command>|<opencode|claude>] --help     # Help for agentcubicle itself
+#   agentcubicle --version                               # Print the agentcubicle version
 #   agentcubicle <opencode|claude> [--mount MOUNT] [--share NAME[:ro|:rw]] [--share-dir PATH[:ro|:rw]] [--env ENV] [--img IMAGE] [--name NAME] [--keep-container] [--readonly] [--] [tool args...]
 #   agentcubicle claude [--account NAME] [...]           # Use ~/.claude/oauth-token-NAME instead of ~/.claude/oauth-token
 #
@@ -44,6 +45,10 @@
 #   agentcubicle claude -- --help                        # Claude Code's own help
 
 set -euo pipefail
+
+# Bumped for each release; the release workflow refuses a vX.Y.Z tag that does
+# not match it. See CONTRIBUTING.md, "Releasing".
+AGENTCUBICLE_VERSION="0.1.0"
 
 # Everything below is keyed to the identity of the invoking user: the container
 # remaps its `user` account onto that UID/GID so files written into the project
@@ -84,6 +89,9 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 WORKDIR="$(pwd)"
+# Host-side agentcubicle config (packages, install.sh, update-check cache). It
+# is never mounted into a container.
+USER_CONFIG_DIR="$HOME/.config/agentcubicle"
 CONTAINER_PROJECT_DIR="/home/user/project"
 COMMIT_TARGET="agentcubicle"
 EXTRA_MOUNTS=()
@@ -355,6 +363,7 @@ _print_usage() {
   echo "       $USAGE_COMMIT"
   echo "       $USAGE_CLEANUP"
   echo "       $USAGE_SHARE"
+  echo "       agentcubicle --version"
   echo
   echo "Run 'agentcubicle <command> --help' (or 'agentcubicle claude --help') for details."
 }
@@ -390,6 +399,10 @@ if [[ $# -gt 0 ]]; then
   case "$1" in
     -h|--help|help)
       _print_usage
+      exit 0
+      ;;
+    -V|--version|version)
+      echo "agentcubicle $AGENTCUBICLE_VERSION"
       exit 0
       ;;
     setup|check|commit|cleanup|list|shell|share)
@@ -487,6 +500,61 @@ if [[ "${1:-}" == "share" ]]; then
   esac
   exit 0
 fi
+
+# Once a day at most, look up the latest release on GitHub, and say so when it
+# is newer than this script. The lookup runs detached in the background and only
+# writes a cache file (epoch of the last attempt, then the latest version seen),
+# which is read at startup, so a run never waits on the network: a new release
+# shows up on the run after the one that found it. A failed lookup only moves
+# the timestamp, so an offline host does not retry on every run. Silent outside
+# a terminal and under AGENTCUBICLE_TEST_CMD; AGENTCUBICLE_NO_UPDATE_CHECK=1
+# turns it off. See docs/DESIGN.md, "Update check".
+RELEASES_URL="https://github.com/stormi/agentcubicle/releases"
+LATEST_RELEASE_API="https://api.github.com/repos/stormi/agentcubicle/releases/latest"
+UPDATE_CHECK_FILE="$USER_CONFIG_DIR/update-check"
+VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+$'
+
+# True when version $1 is greater than version $2, both X.Y.Z.
+_version_gt() {
+  local i a b
+  IFS=. read -ra a <<<"$1"
+  IFS=. read -ra b <<<"$2"
+  for i in 0 1 2; do
+    (( 10#${a[i]} > 10#${b[i]} )) && return 0
+    (( 10#${a[i]} < 10#${b[i]} )) && return 1
+  done
+  return 1
+}
+
+_update_check() {
+  local now last="" latest=""
+  [[ "${AGENTCUBICLE_NO_UPDATE_CHECK:-}" != 1 ]] || return 0
+  [[ -z "${AGENTCUBICLE_TEST_CMD:-}" ]] || return 0
+  [[ -t 2 ]] || return 0
+  if [[ -f "$UPDATE_CHECK_FILE" ]]; then
+    { read -r last && read -r latest; } <"$UPDATE_CHECK_FILE" || true
+  fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  [[ "$latest" =~ $VERSION_RE ]] || latest=""
+  if [[ -n "$latest" ]] && _version_gt "$latest" "$AGENTCUBICLE_VERSION"; then
+    echo "agentcubicle: version $latest is available (this is $AGENTCUBICLE_VERSION): $RELEASES_URL" >&2
+  fi
+  now="$(date +%s)"
+  (( now - last >= 86400 )) || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  mkdir -p "$USER_CONFIG_DIR" 2>/dev/null || return 0
+  (
+    tag="$(curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' "$LATEST_RELEASE_API" \
+      | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)" || tag=""
+    [[ "$tag" =~ $VERSION_RE ]] || tag="$latest"
+    tmp="$(mktemp "$UPDATE_CHECK_FILE.XXXXXX")" || exit 0
+    if printf '%s\n%s\n' "$now" "$tag" >"$tmp"; then mv -f "$tmp" "$UPDATE_CHECK_FILE"; else rm -f "$tmp"; fi
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+case "${1:-}" in
+  opencode|claude|setup) _update_check ;;
+esac
 
 # Container engine: honor AGENTCUBICLE_ENGINE if set, otherwise auto-detect,
 # preferring podman when both are installed.
@@ -601,7 +669,6 @@ _seed_if_absent() {
 # directory, not in the project: .agentcubicle/ is mounted into the container,
 # and these files drive root-level changes to the image, so the agent must not
 # be able to edit them.
-USER_CONFIG_DIR="$HOME/.config/agentcubicle"
 USER_PACKAGES_FILE="$USER_CONFIG_DIR/packages"
 USER_PACKAGES=()
 
