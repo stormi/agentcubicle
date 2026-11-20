@@ -18,6 +18,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Full history and tags, for the commit list in the release notes.
+          fetch-depth: 0
 
       - name: Check the tag matches the script version
         run: |
@@ -36,7 +39,33 @@ jobs:
       - name: Syntax check
         run: bash -n agentcubicle
 
+      # GitHub's generated notes only list merged pull requests, and compare
+      # against the previous tag, whether or not it was released. Most changes
+      # land as direct commits, so list commit subjects instead, since the
+      # previous published release (a stray tag without a release is skipped).
+      - name: Write the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          prev="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')"
+          if [ -n "$prev" ]; then
+            range="$prev..$GITHUB_REF_NAME"
+            echo "Changes since $prev:" > notes.md
+          else
+            range="$GITHUB_REF_NAME"
+            echo "Changes:" > notes.md
+          fi
+          echo >> notes.md
+          git log --no-merges --reverse --format='- %s' "$range" \
+            | grep -v -E '^- Release [0-9]+\.[0-9]+\.[0-9]+$' >> notes.md || true
+          if [ -n "$prev" ]; then
+            printf '\n**Full Changelog**: %s/%s/compare/%s...%s\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$prev" "$GITHUB_REF_NAME" >> notes.md
+          fi
+          cat notes.md
+
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" agentcubicle --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" agentcubicle --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

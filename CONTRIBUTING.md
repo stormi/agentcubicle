@@ -107,9 +107,13 @@ Versions follow SemVer, still in `0.x`. To release:
    commit (`Release 0.2.0`), on `main`.
 2. Tag that commit `v0.2.0` and push the tag along with `main`.
 
-`.github/workflows/release.yml` then creates the GitHub release, with
-generated notes and the script attached. It fails without releasing if the
-tag is not `vX.Y.Z` or does not match `AGENTCUBICLE_VERSION`. Installed
+`.github/workflows/release.yml` then creates the GitHub release, with the
+script attached. Its notes list the subject line of every commit since the
+previous published release (the `Release X.Y.Z` commit left out), so write
+subjects that make sense to users. A tag that never got a release (pushed
+too early, for example) is skipped. Edit the notes on GitHub afterwards to add
+detail. The workflow fails without releasing if the tag is not `vX.Y.Z` or
+does not match `AGENTCUBICLE_VERSION`. Installed
 scripts compare their own version to the latest release (see README,
 "agentcubicle versions and the update check"), so a release is what tells
 users there is something new; commits on `main` alone do not.
