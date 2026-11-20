@@ -225,13 +225,13 @@ dir rather than reusing the host `/run/user/<uid>` path. Both engine paths
 
 Without an init, the tool ended up as the container's PID 1: the entrypoint
 shell `exec`s `su`, BusyBox `su` replaces itself with the inner shell, and
-that shell `exec`s the tool. PID 1 adopts every orphaned process in the
+that shell `exec`ed the tool (it no longer does, see "Ctrl+Z" below). PID 1 adopts every orphaned process in the
 container, and neither Claude Code (Node) nor opencode reaps children it did
 not spawn itself, so orphans stayed zombies until the container exited.
 Seen in practice: `xclip` (it forks to keep owning the clipboard selection),
 `git`, and `timeout` wrappers. Both run paths pass `--init`, so the engine
 puts its own init in front (tini as `docker-init`, `catatonit` under
-podman), which reaps orphans and forwards signals to the tool.
+podman), which reaps orphans and forwards signals to its child.
 
 Using the engine's init rather than one baked into the image avoids an image
 rebuild for existing users, at the cost of depending on the init binary
@@ -240,9 +240,39 @@ ship it; where one does not, the container fails to start with the engine's
 own error, which the README covers. The short probe containers (`check`,
 `setup`) do not need it and do not pass it.
 
-This is separate from the Ctrl+Z problem (a suspended tool has no shell to
-resume it from), which still stands: the init forwards signals but is not a
-job-control shell.
+## Ctrl+Z
+
+Ctrl+Z in Claude Code or opencode does not reach the terminal driver (the
+TUI keeps the terminal in raw mode): the tool restores the terminal and
+stops itself with SIGTSTP. When the inner shell `exec`ed the tool, the
+stopped tool's parent was the engine init, which reaps children but never
+resumes a stopped one, so the session hung with no way back short of
+`kill -CONT` from another shell, and that left the TUI's terminal state
+broken.
+
+The inner shell now turns on job control (`set -m`) and runs the tool in
+the foreground instead of `exec`ing it. The tool gets its own process
+group, which holds the terminal. When it stops, the shell takes the
+terminal back and sees status 148 (128 + SIGTSTP); it then starts an
+interactive `sh -i`, the closest thing to the host shell a real Ctrl+Z
+returns to, and resumes the tool with `fg` once that shell exits. `jobs %1`
+tells a stop from a tool that really exits with 148. The tool's own exit
+status is passed on. Plain `fg` does not work inside that `sh -i`, since
+the stopped job belongs to its parent shell; the message printed on
+suspend says to exit instead.
+
+The obvious alternative, `tool & wait $!`, does not work: without job
+control a background command gets its stdin from `/dev/null`, and `wait`
+only returns when the job ends, not when it stops.
+
+The cost is on stop signals. `docker stop` or `podman stop` sends SIGTERM
+to the init, which forwards it to its child, now the shell rather than the
+tool. The shell exits, the init follows, and the tool is killed along with
+the rest of the container without getting a SIGTERM of its own. A trap in
+the shell cannot forward it: BusyBox `sh` runs traps only after the
+foreground job returns. Quitting the tool normally, resizing the window
+(SIGWINCH goes to the terminal's foreground process group, the tool) and
+Ctrl+C (handled by the TUI as a key) are unaffected.
 
 ## Timezone
 
@@ -710,8 +740,7 @@ update has nowhere to land: Claude Code installs the new build into
 `~/.local/share/claude/versions/` and re-points `~/.local/bin/claude` at
 it, both inside the container's throwaway `/home/user`, and both gone the
 moment the tool exits. The restart it then asks for cannot help either,
-since the tool runs via `exec` as a direct child of the entrypoint shell,
-so exiting it exits the container. Measured in a real session: an image
+since the container exits when the tool does. Measured in a real session: an image
 built with `2.1.250` had fetched `2.1.272` (221MB) within minutes, and
 would have fetched it again on the next run, and the one after that.
 

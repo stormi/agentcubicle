@@ -2061,8 +2061,8 @@ GIT_SETUP='if [ -n "$HOST_GITCONFIG_B64" ]; then printf %s "$HOST_GITCONFIG_B64"
 # Claude Code updates itself in the background and then asks for a restart.
 # Neither half works here: the container is removed when the tool exits, so
 # the ~220MB it downloads into ~/.local/share/claude/versions/ is discarded,
-# and claude runs via exec as a direct child of the entrypoint shell, so
-# there is nothing to restart into. Without this the same download repeats
+# and when claude exits the container goes with it, so there is nothing to
+# restart into. Without this the same download repeats
 # every single session. DISABLE_AUTOUPDATER only stops the background check,
 # so `claude update` still works inside a container for a one-off. The :-
 # default is expanded by the inner shell, after su, so --env
@@ -2110,10 +2110,23 @@ if [[ -n "$CLAUDE_ADD_DIRS" ]]; then
   CLAUDE_ADD_DIR_ARGS="--add-dir$CLAUDE_ADD_DIRS "
 fi
 
+# Ctrl+Z in the TUI makes the tool stop itself with SIGTSTP. Run with exec,
+# its parent would be the engine init, which never resumes a stopped child,
+# so the session hung. Instead the shell turns on job control (set -m) and
+# runs the tool in the foreground: on a stop it gets the terminal back
+# (status 148), offers a shell in the container, and resumes the tool with
+# fg when that shell exits. jobs %1 tells a real exit status of 148 from a
+# stop. See DESIGN.md, "Ctrl+Z". No apostrophes in the message: it goes
+# through the same su -c reparse as the rest of INNER_CMD.
+SUSPEND_SETUP='set -m 2>/dev/null; '
+_suspend_tail() {
+  printf '%s' "; _ac_rc=\$?; while [ \$_ac_rc -eq 148 ] && jobs %1 >/dev/null 2>&1; do echo; echo \"$1 is suspended (Ctrl+Z). This is a shell in the container: type exit or press Ctrl+D to resume $1.\"; sh -i; fg %1 >/dev/null; _ac_rc=\$?; done; exit \$_ac_rc"
+}
+
 if [[ "$TOOL" == "opencode" ]]; then
-  INNER_CMD="$TERM_SETUP$GIT_SETUP export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; exec opencode --agent plan --prompt '$KICKOFF_PROMPT' \"\$@\""
+  INNER_CMD="$TERM_SETUP$GIT_SETUP$SUSPEND_SETUP export OPENCODE_CONFIG_CONTENT='$OPENCODE_CONFIG_JSON'; opencode --agent plan --prompt '$KICKOFF_PROMPT' \"\$@\"$(_suspend_tail opencode)"
 elif $CLAUDE_HAS_CREDENTIALS; then
-  INNER_CMD="$TERM_SETUP$GIT_SETUP$CLAUDE_ENV_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; exec claude $CLAUDE_ADD_DIR_ARGS--permission-mode plan \"\$@\" '$KICKOFF_PROMPT'"
+  INNER_CMD="$TERM_SETUP$GIT_SETUP$CLAUDE_ENV_SETUP$SUSPEND_SETUP export CLAUDE_CONFIG_DIR=$CONTAINER_PROJECT_DIR/.agentcubicle/claude-home; claude $CLAUDE_ADD_DIR_ARGS--permission-mode plan \"\$@\" '$KICKOFF_PROMPT'$(_suspend_tail claude)"
 else
   # No credentials detected on the host. Instead of starting a normal
   # session (which would just hit a login wall), run `claude setup-token`
