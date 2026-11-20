@@ -49,7 +49,7 @@ set -euo pipefail
 
 # Bumped for each release; the release workflow refuses a vX.Y.Z tag that does
 # not match it. See CONTRIBUTING.md, "Releasing".
-AGENTCUBICLE_VERSION="0.1.0"
+AGENTCUBICLE_VERSION="0.2.1"
 
 # Everything below is keyed to the identity of the invoking user: the container
 # remaps its `user` account onto that UID/GID so files written into the project
