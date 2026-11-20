@@ -732,6 +732,23 @@ later read-write sessions as well, which the README states. Other mounts
 (`--share`, `--share-dir`, `--mount`) keep the mode they were given, so
 the kickoff prompt only claims the project directory is read-only.
 
+## First run in a directory asks first
+
+The project is whatever directory agentcubicle is started from, and a
+first run there writes into it: `.agentcubicle/`, the root
+`CLAUDE.local.md` symlink, `.git/info/exclude` entries. Starting from the
+wrong directory (a parent, a sibling repo) is easy, and the cleanup is
+manual. So when `.agentcubicle/` is missing, the run path asks before any
+of that happens, right after option parsing.
+
+The marker is the `.agentcubicle/` directory alone: every run creates it,
+and nothing else does. The default answer is no, since the question only
+appears in the case that may be a mistake. `--new-project` skips it for
+people who start new projects often or script their runs. Without a
+terminal on stdin the run refuses instead of assuming yes, so a script that
+starts in the wrong directory fails the same way a person would be stopped.
+CI checks that refusal and passes `--new-project` on its first run.
+
 ## Tool auto-updates are disabled in the container
 
 Both tools update themselves in the background. In a container that is

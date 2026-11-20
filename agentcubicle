@@ -105,6 +105,7 @@ TOOL=""
 CMD_NAME=""
 KEEP_CONTAINER=false
 READONLY=false
+NEW_PROJECT=false
 # Nested containers: empty until --nested-containers / --no-nested-containers or
 # the host-side config file decides.
 NESTED=""
@@ -387,6 +388,8 @@ _print_run_help() {
   echo "                             environment, which keeps secrets off the command line. Repeatable."
   echo "  --keep-container           Keep the container after $1 exits"
   echo "  --readonly                 Mount the project read-only, except .agentcubicle/"
+  echo "  --new-project              Start without asking when the current directory has no"
+  echo "                             .agentcubicle/ yet (a first run there)"
   echo "  --nested-containers        Let the agent run containers with rootless podman. Loosens the"
   echo "                             container sandbox; see README, \"Nested containers\"."
   echo "  --no-nested-containers     Turn nested containers off for this run, even if the project is"
@@ -931,6 +934,10 @@ if [[ -z "$COMMAND" ]]; then
         READONLY=true
         shift
         ;;
+      --new-project)
+        NEW_PROJECT=true
+        shift
+        ;;
       --nested-containers)
         NESTED=true
         shift
@@ -970,6 +977,28 @@ if [[ -z "$COMMAND" ]]; then
       echo "Error: --account name must only contain letters, digits, '-' and '_'." >&2
       exit 1
     fi
+  fi
+
+  # A first run in a directory sets it up as a project (.agentcubicle/, the
+  # CLAUDE.local.md symlink, .git/info/exclude entries), and starting in the
+  # wrong directory is an easy mistake. So ask before anything is written,
+  # unless --new-project says it is intended. Without a terminal there is
+  # nobody to ask: refuse rather than guess.
+  if [[ ! -d "$WORKDIR/.agentcubicle" ]] && ! $NEW_PROJECT; then
+    echo "agentcubicle has not been used in $WORKDIR yet (no .agentcubicle/ directory)." >&2
+    echo "Starting $TOOL here creates .agentcubicle/ and a CLAUDE.local.md symlink in it." >&2
+    if [[ ! -t 0 ]]; then
+      echo "Error: no terminal to ask on. Pass --new-project to start here anyway." >&2
+      exit 1
+    fi
+    read -r -p "Start here anyway? [y/N] " NEW_PROJECT_REPLY
+    case "$NEW_PROJECT_REPLY" in
+      [yY]|[yY][eE][sS]) ;;
+      *)
+        echo "Cancelled. (--new-project skips this question.)" >&2
+        exit 1
+        ;;
+    esac
   fi
 fi
 CLAUDE_TOKEN_FILE="$HOME/.claude/oauth-token${ACCOUNT:+-$ACCOUNT}"

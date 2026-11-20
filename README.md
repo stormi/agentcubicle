@@ -68,7 +68,8 @@ agentcubicle setup --claude
 # Inspect the image for installed tools
 agentcubicle check
 
-# Run opencode in a container
+# Run opencode in a container, from your project directory
+# (the first time there, it asks before setting the directory up)
 agentcubicle opencode
 
 # Run claude code in a container
@@ -413,11 +414,16 @@ If no subcommand is given, a new container is started based on `agentcubicle` wi
 | `--env E`   | Extra env var: `--env NAME=value`, or `--env NAME` to take the value from your environment (keeps it out of the process list, see below). Repeatable. |
 | `--keep-container` | Keep the container after the tool exits. Without it, the container is removed on exit. |
 | `--readonly` | Mount the project read-only, except `.agentcubicle/` (the agent's persistent memory and Claude Code state), which stays writable. The agent can therefore still edit its local rules, memory and `claude-home/settings.json` (hooks included), and those edits apply to later read-write sessions too. Mounts from `--share`, `--share-dir` and `--mount` keep their own mode. The agent is told through the first prompt and `AGENTCUBICLE_READONLY=1`. |
+| `--new-project` | Start without asking when the current directory has never been used with agentcubicle (see [First run in a directory](#first-run-in-a-directory)). |
 | `--nested-containers` | Let the agent run containers with rootless podman inside its own container. Off by default because it loosens the sandbox; see [Nested containers](#nested-containers). |
 | `--no-nested-containers` | Turn nested containers off for this run, even if the project is listed in `~/.config/agentcubicle/nested-containers`. |
 | `--account A` | `claude` only: use the token in `~/.claude/oauth-token-A` instead of `~/.claude/oauth-token` (see [Using another Claude account](#using-another-claude-account)). |
 | `-h`, `--help` | Show agentcubicle's options for running the tool, without starting a container. For the tool's own help, use `agentcubicle claude -- --help`. |
 | `--`        | Pass remaining arguments directly to the tool                  |
+
+### First run in a directory
+
+The current directory becomes the project. When it has no `.agentcubicle/` directory yet, agentcubicle has never been run there, and starting would create `.agentcubicle/` and a `CLAUDE.local.md` symlink in it. Since that is also what happens when you start from the wrong directory by mistake, agentcubicle says so and asks `Start here anyway? [y/N]` before writing anything. Anything other than `y` or `yes` cancels. `--new-project` skips the question. Without a terminal to ask on (a script, CI), the run stops with an error unless `--new-project` is given.
 
 ### Environment values and the command line
 

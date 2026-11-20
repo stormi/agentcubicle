@@ -102,10 +102,20 @@ jobs:
           set -euxo pipefail
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           rm -f probe.txt cfgprobe.txt
+          # First run in this checkout: with no terminal and no --new-project,
+          # the new-project question cannot be asked, so the run must refuse
+          # before writing anything.
+          test ! -e .agentcubicle
+          if AGENTCUBICLE_TEST_CMD='true' ./agentcubicle opencode < /dev/null 2> guard-err.txt; then
+            echo "expected a refusal without --new-project"; exit 1
+          fi
+          cat guard-err.txt
+          grep -q -- --new-project guard-err.txt
+          test ! -e .agentcubicle
           # AGENTCUBICLE_TEST_CMD replaces the interactive tool launch with a
           # non-interactive command so the real run path can be driven in CI.
           AGENTCUBICLE_TEST_CMD='id -u > /home/user/project/probe.txt; id -un >> /home/user/project/probe.txt; cat /home/user/.config/opencode/opencode.json > /home/user/project/cfgprobe.txt' \
-            ./agentcubicle opencode
+            ./agentcubicle opencode --new-project
           echo "--- probe.txt (in-container id) ---"; cat probe.txt
           echo "--- cfgprobe.txt (config seen inside container) ---"; cat cfgprobe.txt
           # In-container UID differs by engine: podman keep-id runs as the
