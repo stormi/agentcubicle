@@ -170,6 +170,12 @@ Users can add Alpine packages through a per-user file,
   the image, because `apk del` in a new layer would not reclaim the space and
   could break things that came to depend on it. `setup --clear` is the way
   to drop one.
+- **`gh` version from the web redirect, not the API.** The base image finds
+  the latest GitHub CLI release from where `github.com/cli/cli/releases/latest`
+  redirects, not from `api.github.com`: unauthenticated API calls are limited
+  per IP, CI runners share IPs, and an empty answer once made the build fetch
+  a URL with no version in it. The build now stops with a message when no
+  `vX.Y.Z` tag comes back.
 - **`install.sh` for non-apk tools, untracked.** A shell script at
   `~/.config/agentcubicle/install.sh` is passed to the build as a base64 build arg
   (the build reads its Dockerfile from stdin, so there is no context for
